@@ -12,7 +12,7 @@ import traceback
 
 from ifc_ids_validator.config import (
     AppConfig, DisciplineRule, Profile, CONF_PATH,
-    get_rules_path
+    get_rules_path, save_rules
 )
 from ifc_ids_validator.validator import (
     MATCH_CONTAINS,
@@ -25,7 +25,6 @@ APP_TITLE = "IFC → IDS HTML отчёт (двухэтапная проверк�
 DEFAULT_REPORT_SUBFOLDER = "Отчет IDS"
 SUB_MSSK = "МССК"
 SUB_DISC = "Дисциплинарные"
-
 
 # =========================
 # ФИРМЕННЫЕ ЦВЕТА / ТЕМА
@@ -135,6 +134,323 @@ class RuleDialog(tk.Toplevel):
         self.destroy()
 
 
+class SectionsDescriptionDialog(tk.Toplevel):
+    def __init__(self, master, rows):
+        super().__init__(master)
+        self.title("Описание разделов")
+        self.geometry("780x620")
+        self.resizable(False, False)
+        self.configure(bg=COLOR_BG)
+
+        self.result = False
+        self.rows_vars = []
+        self.rows_widgets = []
+        self.current_row_index = None
+
+        self.initial_rows = [
+            [str(row[0]), str(row[1])]
+            for row in rows
+            if isinstance(row, (list, tuple)) and len(row) >= 2
+        ]
+        if not self.initial_rows:
+            self.initial_rows = [["", ""]]
+
+        outer = tk.Frame(self, bg=COLOR_BG, padx=16, pady=16)
+        outer.pack(fill="both", expand=True)
+
+        card = tk.Frame(
+            outer,
+            bg=COLOR_SURFACE,
+            highlightbackground=COLOR_BORDER,
+            highlightthickness=1
+        )
+        card.pack(fill="both", expand=True)
+
+        header = tk.Frame(card, bg=COLOR_BLUE, height=52)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+
+        tk.Label(
+            header,
+            text="Описание разделов",
+            bg=COLOR_BLUE,
+            fg="white",
+            font=("Segoe UI Semibold", 12)
+        ).pack(side="left", padx=16)
+
+        body = tk.Frame(card, bg=COLOR_SURFACE, padx=16, pady=16)
+        body.pack(fill="both", expand=True)
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+
+        # Область таблицы со скроллом
+        table_outer = tk.Frame(body, bg=COLOR_SURFACE)
+        table_outer.grid(row=0, column=0, sticky="nsew")
+        table_outer.grid_rowconfigure(1, weight=1)
+        table_outer.grid_columnconfigure(0, weight=1)
+
+        # Заголовки
+        header_row = tk.Frame(table_outer, bg=COLOR_SURFACE)
+        header_row.grid(row=0, column=0, sticky="ew")
+        header_row.grid_columnconfigure(0, weight=0)
+        header_row.grid_columnconfigure(1, weight=1)
+
+        tk.Label(
+            header_row,
+            text="Код",
+            bg=COLOR_SURFACE_2,
+            fg=COLOR_TEXT,
+            font=("Segoe UI Semibold", 10),
+            bd=1,
+            relief="solid",
+            padx=8,
+            pady=8,
+            width=18
+        ).grid(row=0, column=0, sticky="nsew")
+
+        tk.Label(
+            header_row,
+            text="Описание",
+            bg=COLOR_SURFACE_2,
+            fg=COLOR_TEXT,
+            font=("Segoe UI Semibold", 10),
+            bd=1,
+            relief="solid",
+            padx=8,
+            pady=8
+        ).grid(row=0, column=1, sticky="nsew")
+
+        # Canvas + scrollbar
+        canvas_wrap = tk.Frame(table_outer, bg=COLOR_SURFACE)
+        canvas_wrap.grid(row=1, column=0, sticky="nsew")
+        canvas_wrap.grid_rowconfigure(0, weight=1)
+        canvas_wrap.grid_columnconfigure(0, weight=1)
+
+        self.canvas = tk.Canvas(
+            canvas_wrap,
+            bg=COLOR_SURFACE,
+            highlightthickness=0,
+            bd=0
+        )
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+
+        v_scroll = ttk.Scrollbar(canvas_wrap, orient="vertical", command=self.canvas.yview)
+        v_scroll.grid(row=0, column=1, sticky="ns")
+
+        self.canvas.configure(yscrollcommand=v_scroll.set)
+
+        self.table_frame = tk.Frame(self.canvas, bg=COLOR_SURFACE)
+        self.table_frame.grid_columnconfigure(0, weight=0)
+        self.table_frame.grid_columnconfigure(1, weight=1)
+
+        self.canvas_window = self.canvas.create_window(
+            (0, 0),
+            window=self.table_frame,
+            anchor="nw"
+        )
+
+        self.table_frame.bind("<Configure>", self._on_frame_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+
+        # Начальные строки
+        for code, desc in self.initial_rows:
+            self._append_row(code, desc)
+
+        # Нижние кнопки
+        bottom = tk.Frame(body, bg=COLOR_SURFACE)
+        bottom.grid(row=1, column=0, sticky="ew", pady=(14, 0))
+
+        info = tk.Label(
+            bottom,
+            text="Enter — новая строка   |   Delete — удалить строку",
+            bg=COLOR_SURFACE,
+            fg=COLOR_MUTED,
+            font=FONT_SMALL
+        )
+        info.pack(side="left")
+
+        right_btns = tk.Frame(bottom, bg=COLOR_SURFACE)
+        right_btns.pack(side="right")
+
+        ttk.Button(
+            right_btns,
+            text="Закрыть",
+            width=16,
+            command=self.destroy,
+            style="Secondary.TButton"
+        ).pack(side="right")
+
+        ttk.Button(
+            right_btns,
+            text="Сохранить",
+            width=16,
+            command=self.on_save,
+            style="Primary.TButton"
+        ).pack(side="right", padx=(0, 8))
+
+        self.bind_all("<Delete>", self._on_delete_key, add="+")
+        self.bind_all("<Return>", self._on_enter_key, add="+")
+        self.bind_all("<KP_Enter>", self._on_enter_key, add="+")
+
+        self.transient(master)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+    def _on_frame_configure(self, _event=None):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event):
+        self.canvas.itemconfigure(self.canvas_window, width=event.width)
+
+    def _focus_row(self, row_index: int):
+        self.current_row_index = row_index
+        if 0 <= row_index < len(self.rows_widgets):
+            code_entry, _ = self.rows_widgets[row_index]
+            try:
+                code_entry.focus_set()
+            except Exception:
+                pass
+
+    def _bind_entry_events(self, entry: tk.Entry, row_index: int):
+        entry.bind("<FocusIn>", lambda e, i=row_index: self._set_current_row(i))
+        entry.bind("<Button-1>", lambda e, i=row_index: self._set_current_row(i))
+        entry.bind("<MouseWheel>", self._on_mousewheel)
+        entry.bind("<Button-4>", self._on_mousewheel)  # Linux
+        entry.bind("<Button-5>", self._on_mousewheel)  # Linux
+
+    def _set_current_row(self, row_index: int):
+        self.current_row_index = row_index
+
+    def _on_mousewheel(self, event):
+        if event.delta:
+            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        else:
+            if event.num == 4:
+                self.canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                self.canvas.yview_scroll(1, "units")
+
+    def _append_row(self, code="", desc=""):
+        var_code = tk.StringVar(value=code)
+        var_desc = tk.StringVar(value=desc)
+
+        row_index = len(self.rows_vars)
+        self.rows_vars.append((var_code, var_desc))
+
+        ent_code = tk.Entry(
+            self.table_frame,
+            textvariable=var_code,
+            font=FONT_MAIN,
+            relief="solid",
+            bd=1
+        )
+        ent_code.grid(row=row_index, column=0, sticky="nsew", ipady=6)
+
+        ent_desc = tk.Entry(
+            self.table_frame,
+            textvariable=var_desc,
+            font=FONT_MAIN,
+            relief="solid",
+            bd=1
+        )
+        ent_desc.grid(row=row_index, column=1, sticky="nsew", ipady=6)
+
+        self.rows_widgets.append((ent_code, ent_desc))
+
+        self._bind_entry_events(ent_code, row_index)
+        self._bind_entry_events(ent_desc, row_index)
+
+    def _rebuild_rows(self):
+        for code_entry, desc_entry in self.rows_widgets:
+            code_entry.destroy()
+            desc_entry.destroy()
+
+        old_data = [(v_code.get(), v_desc.get()) for v_code, v_desc in self.rows_vars]
+
+        self.rows_vars = []
+        self.rows_widgets = []
+
+        for code, desc in old_data:
+            self._append_row(code, desc)
+
+        self._on_frame_configure()
+
+    def _on_enter_key(self, event=None):
+        widget = self.focus_get()
+        if widget is None:
+            return
+
+        if not self._widget_belongs_to_table(widget):
+            return
+
+        insert_after = self.current_row_index if self.current_row_index is not None else len(self.rows_vars) - 1
+
+        current_data = [(v_code.get(), v_desc.get()) for v_code, v_desc in self.rows_vars]
+        current_data.insert(insert_after + 1, ("", ""))
+
+        self.rows_vars = [(tk.StringVar(value=c), tk.StringVar(value=d)) for c, d in current_data]
+        self._rebuild_rows()
+        self.current_row_index = insert_after + 1
+        self.after(10, lambda: self._focus_row(self.current_row_index))
+
+        return "break"
+
+    def _on_delete_key(self, event=None):
+        widget = self.focus_get()
+        if widget is None:
+            return
+
+        if not self._widget_belongs_to_table(widget):
+            return
+
+        if self.current_row_index is None:
+            return
+
+        if len(self.rows_vars) <= 1:
+            self.rows_vars[0][0].set("")
+            self.rows_vars[0][1].set("")
+            return "break"
+
+        current_data = [(v_code.get(), v_desc.get()) for v_code, v_desc in self.rows_vars]
+        del current_data[self.current_row_index]
+
+        self.rows_vars = [(tk.StringVar(value=c), tk.StringVar(value=d)) for c, d in current_data]
+        next_index = min(self.current_row_index, len(current_data) - 1)
+
+        self._rebuild_rows()
+        self.current_row_index = next_index
+        self.after(10, lambda: self._focus_row(self.current_row_index))
+
+        return "break"
+
+    def _widget_belongs_to_table(self, widget):
+        parent = widget
+        while parent is not None:
+            if parent == self.table_frame:
+                return True
+            try:
+                parent = parent.master
+            except Exception:
+                break
+        return False
+
+    def on_save(self):
+        self.result = [
+            [var_code.get().strip(), var_desc.get().strip()]
+            for var_code, var_desc in self.rows_vars
+        ]
+        self.destroy()
+
+    def destroy(self):
+        try:
+            self.unbind_all("<Delete>")
+            self.unbind_all("<Return>")
+            self.unbind_all("<KP_Enter>")
+        except Exception:
+            pass
+        super().destroy()
+
+
 class RulesSettingsDialog(tk.Toplevel):
     def __init__(self, master, profile: Profile, mode_title: str):
         super().__init__(master)
@@ -151,6 +467,13 @@ class RulesSettingsDialog(tk.Toplevel):
             DisciplineRule(pattern=r.pattern, code=r.code, ids_path=r.ids_path)
             for r in self.profile.disc_rules
         ]
+        self.local_section_descriptions = [
+            [str(row[0]), str(row[1])]
+            for row in self.profile.section_descriptions
+            if isinstance(row, (list, tuple)) and len(row) >= 2
+        ]
+        if not self.local_section_descriptions:
+            self.local_section_descriptions = [["", ""]]
 
         outer = tk.Frame(self, bg=COLOR_BG, padx=16, pady=16)
         outer.pack(fill="both", expand=True)
@@ -235,9 +558,37 @@ class RulesSettingsDialog(tk.Toplevel):
 
         frm_bottom = tk.Frame(body, bg=COLOR_SURFACE)
         frm_bottom.grid(row=3, column=0, sticky="ew")
+        frm_bottom.grid_columnconfigure(0, weight=1)
 
-        ttk.Button(frm_bottom, text="Отмена", width=16, command=self.destroy, style="Secondary.TButton").pack(side="right")
-        ttk.Button(frm_bottom, text="Сохранить", width=16, command=self.on_save, style="Primary.TButton").pack(side="right", padx=(0, 8))
+        left_btns = tk.Frame(frm_bottom, bg=COLOR_SURFACE)
+        left_btns.pack(side="left")
+
+        right_btns = tk.Frame(frm_bottom, bg=COLOR_SURFACE)
+        right_btns.pack(side="right")
+
+        ttk.Button(
+            left_btns,
+            text="Описание разделов",
+            width=20,
+            command=self.open_sections_description,
+            style="Secondary.TButton"
+        ).pack(side="left")
+
+        ttk.Button(
+            right_btns,
+            text="Отмена",
+            width=16,
+            command=self.destroy,
+            style="Secondary.TButton"
+        ).pack(side="right")
+
+        ttk.Button(
+            right_btns,
+            text="Сохранить",
+            width=16,
+            command=self.on_save,
+            style="Primary.TButton"
+        ).pack(side="right", padx=(0, 8))
 
         self.transient(master)
         self.grab_set()
@@ -258,6 +609,12 @@ class RulesSettingsDialog(tk.Toplevel):
         )
         if path:
             self.var_common.set(path)
+
+    def open_sections_description(self):
+        dlg = SectionsDescriptionDialog(self, self.local_section_descriptions)
+        self.wait_window(dlg)
+        if dlg.result:
+            self.local_section_descriptions = dlg.result
 
     def on_rule_add(self):
         dlg = RuleDialog(self, "Добавить правило дисциплины")
@@ -291,6 +648,11 @@ class RulesSettingsDialog(tk.Toplevel):
         self.profile.disc_rules = [
             DisciplineRule(pattern=r.pattern, code=r.code, ids_path=r.ids_path)
             for r in self.local_rules
+        ]
+        self.profile.section_descriptions = [
+            [str(row[0]), str(row[1])]
+            for row in self.local_section_descriptions
+            if len(row) >= 2
         ]
         self.result = True
         self.destroy()
@@ -459,6 +821,28 @@ class App(tk.Tk):
             darkcolor=COLOR_BLUE
         )
 
+        style.configure(
+            "Treeview",
+            background="white",
+            foreground=COLOR_TEXT,
+            rowheight=28,
+            fieldbackground="white",
+            bordercolor=COLOR_BORDER,
+            borderwidth=1,
+            font=FONT_MAIN
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=COLOR_SURFACE_2,
+            foreground=COLOR_TEXT,
+            font=("Segoe UI Semibold", 10)
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", COLOR_BLUE)],
+            foreground=[("selected", "white")]
+        )
+
     # ---------- UI ----------
     def _build_header(self):
         header = tk.Frame(self, bg=COLOR_BLUE_DARK, height=84)
@@ -506,9 +890,39 @@ class App(tk.Tk):
         top_projects.grid(row=0, column=0, sticky="ew")
         top_projects.grid_columnconfigure(0, weight=1)
 
-        self.nb_projects = ttk.Notebook(top_projects)
-        self.nb_projects.grid(row=0, column=0, sticky="ew")
+        tabs_wrap = tk.Frame(top_projects, bg=COLOR_SURFACE)
+        tabs_wrap.grid(row=0, column=0, sticky="ew")
+        tabs_wrap.grid_columnconfigure(0, weight=1)
+        tabs_wrap.grid_rowconfigure(0, weight=1)
+
+        self.project_tabs_canvas = tk.Canvas(
+            tabs_wrap,
+            bg=COLOR_SURFACE,
+            highlightthickness=0,
+            bd=0,
+            height=42
+        )
+        self.project_tabs_canvas.grid(row=0, column=0, sticky="ew")
+
+        self.project_tabs_scroll = ttk.Scrollbar(
+            tabs_wrap,
+            orient="horizontal",
+            command=self.project_tabs_canvas.xview
+        )
+        self.project_tabs_scroll.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+
+        self.project_tabs_canvas.configure(xscrollcommand=self.project_tabs_scroll.set)
+
+        self.nb_projects = ttk.Notebook(self.project_tabs_canvas)
+        self.nb_projects_window = self.project_tabs_canvas.create_window(
+            (0, 0),
+            window=self.nb_projects,
+            anchor="nw"
+        )
+
         self.nb_projects.bind("<<NotebookTabChanged>>", self.on_profile_tab_change)
+        self.nb_projects.bind("<Configure>", self._update_project_tabs_scrollregion)
+        self.project_tabs_canvas.bind("<Configure>", self._on_project_tabs_canvas_configure)
 
         btns = tk.Frame(top_projects, bg=COLOR_SURFACE)
         btns.grid(row=0, column=1, sticky="e", padx=(14, 0))
@@ -702,6 +1116,24 @@ class App(tk.Tk):
         ).pack(fill="x")
 
     # ---------- helpers ----------
+    def _update_project_tabs_scrollregion(self, _event=None):
+        self.project_tabs_canvas.configure(
+            scrollregion=self.project_tabs_canvas.bbox("all")
+        )
+
+    def _on_project_tabs_canvas_configure(self, event):
+        self.update_idletasks()
+        req_width = self.nb_projects.winfo_reqwidth()
+        new_width = max(event.width, req_width)
+
+        self.project_tabs_canvas.itemconfigure(
+            self.nb_projects_window,
+            width=new_width
+        )
+        self.project_tabs_canvas.configure(
+            scrollregion=self.project_tabs_canvas.bbox("all")
+        )
+
     def _refresh_project_tabs(self):
         current_name = self.cfg.active
 
@@ -717,6 +1149,9 @@ class App(tk.Tk):
         if current_name in self._tab_profile_names:
             idx = self._tab_profile_names.index(current_name)
             self.nb_projects.select(idx)
+        
+        self.update_idletasks()
+        self._update_project_tabs_scrollregion()
 
     def log(self, msg: str):
         self.txt_log.insert("end", msg + "\n")
@@ -759,6 +1194,11 @@ class App(tk.Tk):
         self.profile.rules_mode = mode_title
         self.profile.common_ids_path = rules_data.get("common_ids_path", "")
         self.profile.disc_rules = list(rules_data.get("disc_rules", []))
+        self.profile.section_descriptions = [
+            [str(row[0]), str(row[1])]
+            for row in rules_data.get("section_descriptions", [])
+            if isinstance(row, (list, tuple)) and len(row) >= 2
+        ]
         self.current_rules_mode = mode_title
         self.rules_mode_var.set(mode_title)
 
@@ -876,6 +1316,14 @@ class App(tk.Tk):
         if dlg.result:
             self.profile.rules_mode = mode_title
             self.rules_mode_var.set(mode_title)
+
+            save_rules(
+                mode_title,
+                self.profile.common_ids_path,
+                self.profile.disc_rules,
+                self.profile.section_descriptions
+            )
+
             self.cfg.save()
 
     # ---------- IFC ----------

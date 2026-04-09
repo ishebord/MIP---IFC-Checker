@@ -14,6 +14,88 @@ RULES_64_PATH = CONF_DIR / "rules_64.json"
 RULES_178_PATH = CONF_DIR / "rules_178.json"
 RULES_CUSTOM_PATH = CONF_DIR / "rules_custom.json"
 
+DEFAULT_SECTIONS_BY_MODE = {
+    "Приказ 178": [
+        ["БФ", "Базовый координационный файл"],
+        ["АР", "Архитектурные решения"],
+        ["КР", "Конструктивные решения"],
+        ["КЖ", "Конструктивные решения - Конструкции железобетонные"],
+        ["КМ", "Конструктивные решения - Конструкции металлические"],
+        ["КД", "Конструктивные решения - Конструкции деревянные"],
+        ["МА", "Конструктивные решения - Модель армирования"],
+        ["ЭС", "Электроснабжение"],
+        ["ЭО", "Электрическое освещение (внутреннее)"],
+        ["ЭМ", "Силовое электрооборудование"],
+        ["ВВ", "Водоснабжение и водоотведение (внутренние)"],
+        ["О", "Отопление"],
+        ["ВК", "Вентиляция и кондиционирование"],
+        ["ТМ", "Тепломеханическая часть (ИТП)"],
+        ["ХС", "Холодоснабжение"],
+        ["ДУ", "Противодымная защита"],
+        ["ПТ", "Система пожаротушения"],
+        ["ПС", "Пожарная сигнализация"],
+        ["СС", "Сети связи"],
+        ["ГСВ", "Газоснабжение (внутреннее)"],
+        ["ТХ", "Технологические решения"],
+    ],
+
+    "Приказ 64": [
+        ["ПЗУ", "Схема планировочной организации земельного участка"],
+        ["ГП", "Генеральный план"],
+        ["АР", "Объемно-планировочные и архитектурные решения"],
+        ["АС", "Архитектурно-строительные решения"],
+        ["АИ", "Интерьеры"],
+        ["ИД", "Информационный дизайн"],
+        ["КР", "Конструктивные решения"],
+        ["КЖ", "Конструкции железобетонные"],
+        ["КМ", "Конструкции металлические"],
+        ["КМД", "Конструкции металлические деталировочные"],
+        ["КД", "Конструкции деревянные"],
+        ["КДД", "Конструкции деревянные деталировочные"],
+        ["ЭС", "Система электроснабжения"],
+        ["ЭО", "Электрическое освещение (внутреннее)"],
+        ["ЭМ", "Силовое электрооборудование"],
+        ["ЭОМ", "Силовое электрооборудование и освещение"],
+        ["ЭП", "Электроснабжение подстанции"],
+        ["ВК", "Система водоснабжения"],
+        ["ВПТ", "Водяное пожаротушение"],
+        ["ВПВ", "Противопожарный водопровод"],
+        ["АУВПТ", "Автоматическая установка водяного пожаротушения"],
+        ["ОВ", "Отопление, вентиляция"],
+        ["ОВК", "Отопление, вентиляция и кондиционирование"],
+        ["ВС", "Воздухоснабжение"],
+        ["ПВ", "Противодымная защита"],
+        ["ПУ", "Пылеудаление"],
+        ["ХС", "Холодоснабжение"],
+        ["ТС", "Тепловые сети"],
+        ["ТМ", "Тепломеханические решения"],
+        ["ЦТП", "Центральные тепловые пункты"],
+        ["ИТП", "Индивидуальные тепловые пункты"],
+        ["СС", "Сети связи"],
+        ["РТ", "Радиосвязь"],
+        ["ПС", "Пожарная сигнализация"],
+        ["ОС", "Охранная сигнализация"],
+        ["АК", "Автоматизация комплексная"],
+        ["АУПТ", "Автоматическое пожаротушение"],
+        ["СБ", "Система безопасности"],
+        ["СА", "Система автоматизации"],
+        ["СД", "Система диспетчеризации"],
+        ["ТХ", "Технологические решения"],
+        ["ТК", "Технологические коммуникации"],
+        ["ВТ", "Вертикальный транспорт"],
+    ],
+
+    # "Настроить" → используем 178
+    "Настроить": None,
+}
+
+def get_default_sections(mode: str) -> List[List[str]]:
+    mode = (mode or "").strip()
+
+    if mode == "Настроить":
+        return [row[:] for row in DEFAULT_SECTIONS_BY_MODE["Приказ 178"]]
+
+    return [row[:] for row in DEFAULT_SECTIONS_BY_MODE.get(mode, DEFAULT_SECTIONS_BY_MODE["Приказ 178"])]
 
 def get_rules_path(mode: str) -> Path:
     mode = (mode or "").strip().lower()
@@ -40,6 +122,7 @@ class Profile:
     disc_rules: List[DisciplineRule] = field(default_factory=list)
     create_summary: bool = True
     rules_mode: str = "Приказ 64"
+    section_descriptions: List[List[str]] = field(default_factory=list)
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "Profile":
@@ -51,6 +134,7 @@ class Profile:
             disc_rules=[],
             create_summary=bool(d.get("create_summary", True)),
             rules_mode=d.get("rules_mode", "Приказ 64"),
+            section_descriptions=[],
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -70,13 +154,24 @@ def load_rules(mode: str) -> Dict[str, Any]:
             raw = json.loads(rules_path.read_text(encoding="utf-8"))
 
             if isinstance(raw, dict):
+                raw_sections = raw.get("section_descriptions", get_default_sections(mode))
+                section_descriptions = [
+                    [str(row[0]), str(row[1])]
+                    for row in raw_sections
+                    if isinstance(row, (list, tuple)) and len(row) >= 2
+                ]
+
+                if not section_descriptions:
+                    section_descriptions = [row[:] for row in get_default_sections(mode)]
+
                 return {
                     "common_ids_path": raw.get("common_ids_path", ""),
                     "disc_rules": [
                         DisciplineRule(**r)
                         for r in raw.get("disc_rules", [])
                         if isinstance(r, dict)
-                    ]
+                    ],
+                    "section_descriptions": section_descriptions,
                 }
 
             if isinstance(raw, list):
@@ -86,25 +181,33 @@ def load_rules(mode: str) -> Dict[str, Any]:
                         DisciplineRule(**r)
                         for r in raw
                         if isinstance(r, dict)
-                    ]
+                    ],
+                    "section_descriptions": get_default_sections(mode),
                 }
     except Exception:
         pass
 
     return {
         "common_ids_path": "",
-        "disc_rules": []
+        "disc_rules": [],
+        "section_descriptions":  get_default_sections(mode),
     }
 
 
-def save_rules(mode: str, common_ids_path: str, rules: List[DisciplineRule]) -> None:
+def save_rules(
+    mode: str,
+    common_ids_path: str,
+    rules: List[DisciplineRule],
+    section_descriptions: List[List[str]] | None = None
+) -> None:
     rules_path = get_rules_path(mode)
 
     try:
         CONF_DIR.mkdir(parents=True, exist_ok=True)
         data = {
             "common_ids_path": common_ids_path or "",
-            "disc_rules": [asdict(r) for r in rules]
+            "disc_rules": [asdict(r) for r in rules],
+            "section_descriptions": section_descriptions if section_descriptions is not None else get_default_sections(mode),
         }
         rules_path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
@@ -126,6 +229,7 @@ class AppConfig:
         rules_data = load_rules(p.rules_mode)
         p.common_ids_path = rules_data.get("common_ids_path", "")
         p.disc_rules = [DisciplineRule(**asdict(r)) for r in rules_data.get("disc_rules", [])]
+        p.section_descriptions = [row[:] for row in rules_data.get("section_descriptions", get_default_sections(p.rules_mode))]
         return AppConfig(profiles={p.name: p}, active=p.name)
 
     @staticmethod
@@ -149,6 +253,7 @@ class AppConfig:
                     rules_data = load_rules(p.rules_mode)
                     p.common_ids_path = rules_data.get("common_ids_path", "")
                     p.disc_rules = [DisciplineRule(**asdict(r)) for r in rules_data.get("disc_rules", [])]
+                    p.section_descriptions = [row[:] for row in rules_data.get("section_descriptions", get_default_sections(p.rules_mode))]
 
                 if not active or active not in profiles:
                     active = next(iter(profiles))
@@ -178,9 +283,6 @@ class AppConfig:
                 encoding="utf-8"
             )
 
-            for p in self.profiles.values():
-                save_rules(p.rules_mode, p.common_ids_path, p.disc_rules)
-
         except Exception:
             pass
 
@@ -206,6 +308,7 @@ class AppConfig:
         p.disc_rules = [
             DisciplineRule(**asdict(r)) for r in rules_data.get("disc_rules", [])
         ]
+        p.section_descriptions = [row[:] for row in rules_data.get("section_descriptions", get_default_sections(p.rules_mode))]
         self.profiles[name] = p
         self.active = name
         return p
@@ -272,6 +375,7 @@ class AppConfig:
         p.disc_rules = [
             DisciplineRule(**asdict(r)) for r in rules_data.get("disc_rules", [])
         ]
+        p.section_descriptions = [row[:] for row in rules_data.get("section_descriptions", get_default_sections(p.rules_mode))]
         self.profiles[p.name] = p
         self.active = p.name
         return p
