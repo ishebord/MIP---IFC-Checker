@@ -17,7 +17,7 @@ from ifc_ids_validator.config import (
 from ifc_ids_validator.validator import (
     MATCH_CONTAINS,
     match_rule, open_ids, open_ifc, emit_reports, get_ifc_site_data,
-    _named_block_percent_from_html
+    _named_block_percent_from_html, _requirements_passed_from_html
 )
 from ifc_ids_validator.summary import write_summary, summary_path
 
@@ -1430,6 +1430,7 @@ class App(tk.Tk):
                     "site_building_pct": None,
                     "building_pct": None,
                     "storey_pct": None,
+                    "qty": None,
                     "dir_root": root_dir,
                     "common": None,
                     "common_pct": None,
@@ -1489,6 +1490,7 @@ class App(tk.Tk):
                         "site_building_pct": None,
                         "building_pct": None,
                         "storey_pct": None,
+                        "qty": None,
                         "dir_root": root_dir,
                         "common": None,
                         "common_pct": None,
@@ -1516,6 +1518,7 @@ class App(tk.Tk):
                         item["site_building_pct"] = _named_block_percent_from_html(html_d, "Участок застройки")
                         item["building_pct"] = _named_block_percent_from_html(html_d, "Здание (сооружение)")
                         item["storey_pct"] = _named_block_percent_from_html(html_d, "Этаж (уровень)")
+                        item["qty"] = _requirements_passed_from_html(html_d)
                         if self.open_after.get() and html_d:
                             try:
                                 webbrowser.open(html_d.as_uri())
