@@ -227,9 +227,9 @@ def write_summary(
         }}
 
         .container {{
-            max-width: 1600px;
+            max-width: 2200px;
             margin: 40px auto;
-            padding: 0 20px;
+            padding: 0 12px;
         }}
 
         .card {{
@@ -260,7 +260,6 @@ def write_summary(
             border-spacing: 0;
             overflow: hidden;
             border-radius: 12px;
-            min-width: 1450px;
         }}
 
         thead {{
@@ -273,7 +272,7 @@ def write_summary(
             font-weight: 600;
             padding: 12px;
             border-bottom: 1px solid var(--border);
-            white-space: nowrap;
+            white-space: normal;
         }}
 
         td {{
@@ -281,6 +280,7 @@ def write_summary(
             border-bottom: 1px solid var(--border);
             font-size: 14px;
             vertical-align: middle;
+            word-break: break-word;
         }}
 
         tr:hover td {{
