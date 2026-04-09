@@ -1534,7 +1534,12 @@ class App(tk.Tk):
                 try:
                     root_dir = items[0]["dir_root"]
                     s_path = summary_path(root_dir)
-                    write_summary(s_path, items, project_name=self.profile.name)
+                    write_summary(
+                        s_path,
+                        items,
+                        project_name=self.profile.name,
+                        section_descriptions=self.profile.section_descriptions
+                    )
                     self.ui_call(self.log, f"★ Сводный отчёт: {s_path}")
                     try:
                         webbrowser.open(s_path.as_uri())

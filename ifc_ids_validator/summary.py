@@ -43,10 +43,10 @@ def _majority_value(items: List[Dict[str, Any]], key: str) -> str:
     cnt = Counter(values)
     value, amount = cnt.most_common(1)[0]
 
-    # Если значение встретилось только 1 раз, большинства нет
     if amount < 2:
         return ""
     return value
+
 
 def _cell_html(value: str, majority: str) -> str:
     value = value or "—"
@@ -61,6 +61,7 @@ def _cell_html(value: str, majority: str) -> str:
         return f"<td class='error-cell'>{value}</td>"
 
     return f"<td>{value}</td>"
+
 
 def _pct_badge(value: str) -> str:
     if not value or value == "—":
@@ -78,7 +79,67 @@ def _pct_badge(value: str) -> str:
     else:
         return f"<td><span class='badge badge-red'>{value}</span></td>"
 
-def write_summary(outfile: Path, items: List[Dict[str, Any]], project_name: str = ""):
+
+def _build_description_lookup(section_descriptions: List[List[str]] | None) -> List[tuple[str, str]]:
+    result: List[tuple[str, str]] = []
+
+    if not section_descriptions:
+        return result
+
+    for row in section_descriptions:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+
+        code = str(row[0]).strip()
+        desc = str(row[1]).strip()
+
+        if not code:
+            continue
+
+        result.append((code.upper(), desc))
+
+    # Сначала ищем более длинные коды, чтобы "ЭОМ" не перебивалось "ЭО"
+    result.sort(key=lambda x: len(x[0]), reverse=True)
+    return result
+
+
+def _model_description(model_name: str, section_descriptions: List[List[str]] | None) -> str:
+    model_upper = _norm(model_name).upper()
+    if not model_upper:
+        return "—"
+
+    lookup = _build_description_lookup(section_descriptions)
+    if not lookup:
+        return "—"
+
+    normalized = model_upper.replace(".", "_").replace("-", "_").replace(" ", "_")
+
+    for code, desc in lookup:
+        patterns = (
+            f"_{code}_",
+            f"{code}_",
+            f"_{code}",
+        )
+
+        if normalized == code:
+            return desc
+
+        if any(p in normalized for p in patterns):
+            return desc
+
+        # Дополнительная проверка для случаев без явных разделителей
+        if code in model_upper:
+            return desc
+
+    return "—"
+
+
+def write_summary(
+    outfile: Path,
+    items: List[Dict[str, Any]],
+    project_name: str = "",
+    section_descriptions: List[List[str]] | None = None,
+):
     """Перезаписывает сводный отчёт. Ссылки делаем относительно outfile.parent."""
     base = outfile.parent
     title = "Сводный IDS отчёт"
@@ -95,6 +156,8 @@ def write_summary(outfile: Path, items: List[Dict[str, Any]], project_name: str 
     rows = []
     for it in items:
         model = it.get("model", "")
+        description = _model_description(model, section_descriptions)
+
         site_name = it.get("site_name") or "—"
         common_html = it.get("common")
         common_pct = it.get("common_pct")
@@ -114,13 +177,14 @@ def write_summary(outfile: Path, items: List[Dict[str, Any]], project_name: str 
         c_href = _rel(base, common_html)
         d_href = _rel(base, disc_html)
 
-        c_cell = f'<a href="{c_href}">{_pct(common_pct)}</a>' if c_href else "—"
+        c_cell = f'<a class="link" href="{c_href}">{_pct(common_pct)}</a>' if c_href else "—"
         d_label = f"Дисциплина ({disc_code}) — {_pct(disc_pct)}" if d_href else "—"
-        d_cell = f'<a href="{d_href}">{d_label}</a>' if d_href else "—"
+        d_cell = f'<a class="link" href="{d_href}">{d_label}</a>' if d_href else "—"
 
         rows.append(
             f"<tr>"
-            f"<td>{model}</td>"
+            f"<td class='model-name'>{model}</td>"
+            f"<td>{description}</td>"
             f"<td style='text-align:center'>{c_cell}</td>"
             f"<td>{d_cell}</td>"
             f"{_cell_html(site_name, maj_site)}"
@@ -136,173 +200,183 @@ def write_summary(outfile: Path, items: List[Dict[str, Any]], project_name: str 
         )
 
     html = f"""<!doctype html>
-            <html lang="ru">
-            <head>
-            <meta charset="utf-8">
-            <title>{title}</title>
+        <html lang="ru">
+        <head>
+        <meta charset="utf-8">
+        <title>{title}</title>
 
-            <style>
-            :root {{
-                --bg: #f5f7fb;
-                --card: #ffffff;
-                --text: #1f2937;
-                --muted: #6b7280;
-                --border: #e5e7eb;
-                --accent: #3b82f6;
-                --green: #10b981;
-                --red: #ef4444;
-            }}
+        <style>
+        :root {{
+            --bg: #f5f7fb;
+            --card: #ffffff;
+            --text: #1f2937;
+            --muted: #6b7280;
+            --border: #e5e7eb;
+            --accent: #3b82f6;
+            --green: #10b981;
+            --red: #ef4444;
+        }}
 
-            body {{
-                margin: 0;
-                background: var(--bg);
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial;
-                color: var(--text);
-            }}
+        body {{
+            margin: 0;
+            background: var(--bg);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial;
+            color: var(--text);
+        }}
 
-            .container {{
-                max-width: 1400px;
-                margin: 40px auto;
-                padding: 0 20px;
-            }}
+        .container {{
+            max-width: 1600px;
+            margin: 40px auto;
+            padding: 0 20px;
+        }}
 
-            .card {{
-                background: var(--card);
-                border-radius: 16px;
-                box-shadow: 0 10px 30px rgba(0,0,0,0.08);
-                padding: 24px;
-            }}
+        .card {{
+            background: var(--card);
+            border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+            padding: 24px;
+        }}
 
-            h1 {{
-                margin: 0 0 10px;
-                font-size: 26px;
-            }}
+        h1 {{
+            margin: 0 0 10px;
+            font-size: 26px;
+        }}
 
-            .meta {{
-                color: var(--muted);
-                font-size: 13px;
-                margin-bottom: 20px;
-            }}
+        .meta {{
+            color: var(--muted);
+            font-size: 13px;
+            margin-bottom: 20px;
+        }}
 
-            table {{
-                width: 100%;
-                border-collapse: separate;
-                border-spacing: 0;
-                overflow: hidden;
-                border-radius: 12px;
-            }}
+        .table-wrap {{
+            overflow-x: auto;
+        }}
 
-            thead {{
-                background: #f9fafb;
-            }}
+        table {{
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            overflow: hidden;
+            border-radius: 12px;
+            min-width: 1450px;
+        }}
 
-            th {{
-                text-align: left;
-                font-size: 13px;
-                font-weight: 600;
-                padding: 12px;
-                border-bottom: 1px solid var(--border);
-            }}
+        thead {{
+            background: #f9fafb;
+        }}
 
-            td {{
-                padding: 12px;
-                border-bottom: 1px solid var(--border);
-                font-size: 14px;
-            }}
+        th {{
+            text-align: left;
+            font-size: 13px;
+            font-weight: 600;
+            padding: 12px;
+            border-bottom: 1px solid var(--border);
+            white-space: nowrap;
+        }}
 
-            tr:hover td {{
-                background: #f9fbff;
-            }}
+        td {{
+            padding: 12px;
+            border-bottom: 1px solid var(--border);
+            font-size: 14px;
+            vertical-align: middle;
+        }}
 
-            .center {{
-                text-align: center;
-            }}
+        tr:hover td {{
+            background: #f9fbff;
+        }}
 
-            .badge {{
-                padding: 4px 10px;
-                border-radius: 999px;
-                font-size: 12px;
-                font-weight: 600;
-                display: inline-block;
-            }}
+        .center {{
+            text-align: center;
+        }}
 
-            .badge-green {{
-                background: rgba(16,185,129,0.1);
-                color: var(--green);
-            }}
+        .badge {{
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 600;
+            display: inline-block;
+        }}
 
-            .badge-red {{
-                background: rgba(239,68,68,0.1);
-                color: var(--red);
-            }}
+        .badge-green {{
+            background: rgba(16,185,129,0.1);
+            color: var(--green);
+        }}
 
-            .link {{
-                text-decoration: none;
-                font-weight: 600;
-                color: var(--accent);
-            }}
+        .badge-red {{
+            background: rgba(239,68,68,0.1);
+            color: var(--red);
+        }}
 
-            .link:hover {{
-                text-decoration: underline;
-            }}
+        .link {{
+            text-decoration: none;
+            font-weight: 600;
+            color: var(--accent);
+        }}
 
-            .error-cell {{
-                background: #ffe4e6 !important;
-                color: #991b1b;
-                font-weight: 600;
-                border-radius: 6px;
-            }}
+        .link:hover {{
+            text-decoration: underline;
+        }}
 
-            .model-name {{
-                font-weight: 600;
-            }}
+        .error-cell {{
+            background: #ffe4e6 !important;
+            color: #991b1b;
+            font-weight: 600;
+            border-radius: 6px;
+        }}
 
-            .footer {{
-                margin-top: 20px;
-                font-size: 12px;
-                color: var(--muted);
-                text-align: right;
-            }}
-            </style>
-            </head>
+        .model-name {{
+            font-weight: 600;
+        }}
 
-            <body>
-            <div class="container">
-            <div class="card">
+        .footer {{
+            margin-top: 20px;
+            font-size: 12px;
+            color: var(--muted);
+            text-align: right;
+        }}
+        </style>
+        </head>
 
-            <h1>{title}</h1>
-            <div class="meta">Создан: {datetime.now().strftime("%Y-%m-%d %H:%M")}</div>
+        <body>
+        <div class="container">
+        <div class="card">
 
-            <table>
-            <thead>
-            <tr>
-            <th>Модель</th>
-            <th class="center">МССК</th>
-            <th>Дисциплина</th>
-            <th>Площадка</th>
-            <th>Global X</th>
-            <th>Global Y</th>
-            <th>Global Z</th>
-            <th>RefLatitude</th>
-            <th>RefLongitude</th>
-            <th>Участок застройки</th>
-            <th>Здание (сооружение)</th>
-            <th>Этаж (уровень)</th>
-            </tr>
-            </thead>
+        <h1>{title}</h1>
+        <div class="meta">Создан: {datetime.now().strftime("%Y-%m-%d %H:%M")}</div>
 
-            <tbody>
-            {''.join(rows)}
-            </tbody>
-            </table>
+        <div class="table-wrap">
+        <table>
+        <thead>
+        <tr>
+        <th>Модель</th>
+        <th>Описание</th>
+        <th class="center">МССК</th>
+        <th>Дисциплина</th>
+        <th>Площадка</th>
+        <th>Global X</th>
+        <th>Global Y</th>
+        <th>Global Z</th>
+        <th>RefLatitude</th>
+        <th>RefLongitude</th>
+        <th>Участок застройки</th>
+        <th>Здание (сооружение)</th>
+        <th>Этаж (уровень)</th>
+        </tr>
+        </thead>
 
-            <div class="footer">
-            IFC → IDS Validator
-            </div>
+        <tbody>
+        {''.join(rows)}
+        </tbody>
+        </table>
+        </div>
 
-            </div>
-            </div>
-            </body>
-            </html>
-            """
+        <div class="footer">
+        IFC → IDS Validator
+        </div>
+
+        </div>
+        </div>
+        </body>
+        </html>
+        """
     outfile.write_text(html, encoding="utf-8")
