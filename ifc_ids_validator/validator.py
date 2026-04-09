@@ -198,6 +198,10 @@ def get_ifc_site_data(model) -> Dict[str, Optional[str]]:
 # ---------------------- percent from HTML (Summary) -----------------
 _percent_num_re = re.compile(r'(\d{1,3})\s*%')
 _percent_style_re = re.compile(r'width\s*:\s*(\d{1,3})\s*%')
+_requirements_re = re.compile(
+    r'Requirements\s+passed\s*:\s*<strong>\s*(\d+)\s*</strong>\s*/\s*<strong>\s*(\d+)\s*</strong>',
+    flags=re.IGNORECASE | re.DOTALL
+)
 
 
 def _percent_from_html(html_path: Path) -> Optional[float]:
@@ -258,6 +262,51 @@ def _percent_from_html(html_path: Path) -> Optional[float]:
         mstyle = _percent_style_re.search(m_all.group(0))
         if mstyle:
             return float(mstyle.group(1))
+
+    return None
+
+
+def _requirements_passed_from_html(html_path: Path) -> Optional[str]:
+    """
+    Извлекает из блока Summary строку вида '254/264'
+    (параметр "Requirements passed: <strong>254</strong> / <strong>264</strong>").
+    """
+    try:
+        text = html_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+
+    if HAVE_BS4:
+        try:
+            soup = BeautifulSoup(text, "html.parser")
+            h2 = soup.find(lambda tag: tag.name in ("h2", "h3") and tag.get_text(strip=True).lower() == "summary")
+            root = h2.parent if h2 else soup
+
+            for p in root.find_all("p"):
+                p_text = p.get_text(" ", strip=True).lower()
+                if "requirements passed" not in p_text:
+                    continue
+
+                spans = p.find_all("span")
+                for span in spans:
+                    span_text = span.get_text(" ", strip=True).lower()
+                    if "requirements passed" not in span_text:
+                        continue
+
+                    strong = span.find_all("strong")
+                    if len(strong) >= 2:
+                        a = strong[0].get_text(strip=True)
+                        b = strong[1].get_text(strip=True)
+                        if a.isdigit() and b.isdigit():
+                            return f"{a}/{b}"
+        except Exception:
+            pass
+
+    idx = text.lower().find("summary")
+    sniff = text[idx: idx + 7000] if idx != -1 else text
+    m = _requirements_re.search(sniff) or _requirements_re.search(text)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
 
     return None
 
