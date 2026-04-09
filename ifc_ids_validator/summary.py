@@ -157,6 +157,7 @@ def write_summary(
     for it in items:
         model = it.get("model", "")
         description = _model_description(model, section_descriptions)
+        qty = it.get("qty") or "—"
 
         site_name = it.get("site_name") or "—"
         common_html = it.get("common")
@@ -185,6 +186,7 @@ def write_summary(
             f"<tr>"
             f"<td class='model-name'>{model}</td>"
             f"<td>{description}</td>"
+            f"<td>{qty}</td>"
             f"<td style='text-align:center'>{c_cell}</td>"
             f"<td>{d_cell}</td>"
             f"{_cell_html(site_name, maj_site)}"
@@ -350,6 +352,7 @@ def write_summary(
         <tr>
         <th>Модель</th>
         <th>Описание</th>
+        <th>Кол-во</th>
         <th class="center">МССК</th>
         <th>Дисциплина</th>
         <th>Площадка</th>
