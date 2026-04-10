@@ -1447,7 +1447,7 @@ class App(tk.Tk):
                         common_specs.validate(model)
                         out_base_common = mssk_dir / ifc_p.stem
                         html_c, json_c, pct_c = emit_reports(common_specs, out_base_common, common_ids, ifc_path)
-                        self.ui_call(self.log, f"✓ МССК отчёт: {html_c}")
+                        self.ui_call(self.log, f"✅ МССК отчёт: {html_c}")
                         item["common"] = html_c
                         item["common_pct"] = pct_c
                         if open_after and html_c:
@@ -1456,9 +1456,9 @@ class App(tk.Tk):
                             except Exception:
                                 pass
                     except Exception as e:
-                        self.ui_call(self.log, f"! МССК ошибка: {e}")
+                        self.ui_call(self.log, f"❌ МССК ошибка: {e}")
                 else:
-                    self.ui_call(self.log, "• Общая IDS не задана — PASS1 пропущен.")
+                    self.ui_call(self.log, "🟡 Общая IDS не задана — PASS1 пропущен.")
 
                 items_map[ifc_path] = item
                 self.ui_call(self.pb.step, 1)
@@ -1511,7 +1511,7 @@ class App(tk.Tk):
                         d_specs.validate(model)
                         out_base_disc = disc_dir / f"{ifc_p.stem}.__{code}"
                         html_d, json_d, pct_d = emit_reports(d_specs, out_base_disc, d_ids, ifc_path)
-                        self.ui_call(self.log, f"✓ Дисциплина ({code}): {html_d}")
+                        self.ui_call(self.log, f"✅ Дисциплина ({code}): {html_d}")
                         item["disc"] = html_d
                         item["disc_pct"] = pct_d
                         item["disc_code"] = code
@@ -1525,9 +1525,9 @@ class App(tk.Tk):
                             except Exception:
                                 pass
                     except Exception as e:
-                        self.ui_call(self.log, f"! Ошибка дисциплины ({code}): {e}")
+                        self.ui_call(self.log, f"❌ Ошибка дисциплины ({code}): {e}")
                 else:
-                    self.ui_call(self.log, "• Правило дисциплины не найдено (пропуск).")
+                    self.ui_call(self.log, "🟡 Правило дисциплины не найдено (пропуск).")
 
                 items_map[ifc_path] = item
                 self.ui_call(self.pb.step, 1)
@@ -1543,7 +1543,7 @@ class App(tk.Tk):
                         project_name=self.profile.name,
                         section_descriptions=self.profile.section_descriptions
                     )
-                    self.ui_call(self.log, f"★ Сводный отчёт: {s_path}")
+                    self.ui_call(self.log, f"🆗 Сводный отчёт: {s_path}")
                     try:
                         webbrowser.open(s_path.as_uri())
                     except Exception:

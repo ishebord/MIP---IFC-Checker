@@ -65,7 +65,7 @@ def _cell_html(value: str, majority: str) -> str:
 
 def _pct_badge(value: str) -> str:
     if not value or value == "—":
-        return "<td class='badge-red'>—</td>"
+        return "<td>—</td>"
 
     v = value.replace("%", "").strip()
 
@@ -352,7 +352,7 @@ def write_summary(
         <tr>
         <th>Модель</th>
         <th>Описание</th>
-        <th>Кол-во</th>
+        <th>Кол-во элементов</th>
         <th class="center">МССК</th>
         <th>Дисциплина</th>
         <th>Площадка</th>
@@ -361,9 +361,9 @@ def write_summary(
         <th>Global Z</th>
         <th>RefLatitude</th>
         <th>RefLongitude</th>
-        <th>Участок застройки</th>
-        <th>Здание (сооружение)</th>
-        <th>Этаж (уровень)</th>
+        <th>IfcSite – Участок застройки</th>
+        <th>IfcBuilding - Здание (сооружение)</th>
+        <th>IfcBuildingStorey - Этаж (уровень)</th>
         </tr>
         </thead>
 
