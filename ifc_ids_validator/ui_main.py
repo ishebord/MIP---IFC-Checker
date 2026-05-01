@@ -17,7 +17,8 @@ from ifc_ids_validator.config import (
 from ifc_ids_validator.validator import (
     MATCH_CONTAINS,
     match_rule, open_ids, open_ifc, emit_reports, get_ifc_site_data,
-    _named_block_percent_from_html, _requirements_passed_from_html
+    get_ifc_elements_count,
+    _ifc_class_percent_from_html
 )
 from ifc_ids_validator.summary import write_summary, summary_path
 
@@ -666,6 +667,7 @@ class App(tk.Tk):
         self.configure(bg=COLOR_BG)
 
         self.ifc_paths = []
+        self.reports_dir_var = tk.StringVar(value="")
         self.open_after = tk.BooleanVar(value=False)
         self.create_summary = tk.BooleanVar(value=True)
         self.is_running = False
@@ -955,8 +957,26 @@ class App(tk.Tk):
 
         btns_ifc = tk.Frame(frm_ifc, bg=COLOR_SURFACE)
         btns_ifc.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        ttk.Button(btns_ifc, text="Выбрать несколько…", command=self.pick_ifcs, style="Primary.TButton").pack(side="left")
-        ttk.Button(btns_ifc, text="Очистить", command=self.clear_ifcs, style="Secondary.TButton").pack(side="left", padx=(8, 0))
+        ttk.Button(
+            btns_ifc,
+            text="Выбрать несколько…",
+            command=self.pick_ifcs,
+            style="Primary.TButton"
+        ).pack(side="left")
+
+        ttk.Button(
+            btns_ifc,
+            text="Выбрать папку…",
+            command=self.pick_ifc_folder,
+            style="Primary.TButton"
+        ).pack(side="left", padx=(8, 0))
+
+        ttk.Button(
+            btns_ifc,
+            text="Очистить",
+            command=self.clear_ifcs,
+            style="Secondary.TButton"
+        ).pack(side="left", padx=(8, 0))
 
         list_wrap = tk.Frame(frm_ifc, bg=COLOR_SURFACE)
         list_wrap.grid(row=1, column=0, sticky="nsew")
@@ -978,9 +998,24 @@ class App(tk.Tk):
         )
         self.lst_ifc.grid(row=0, column=0, sticky="nsew")
 
-        sb_ifc = ttk.Scrollbar(list_wrap, orient="vertical", command=self.lst_ifc.yview)
-        sb_ifc.grid(row=0, column=1, sticky="ns")
-        self.lst_ifc.config(yscrollcommand=sb_ifc.set)
+        sb_ifc_y = ttk.Scrollbar(
+            list_wrap,
+            orient="vertical",
+            command=self.lst_ifc.yview
+        )
+        sb_ifc_y.grid(row=0, column=1, sticky="ns")
+
+        sb_ifc_x = ttk.Scrollbar(
+            list_wrap,
+            orient="horizontal",
+            command=self.lst_ifc.xview
+        )
+        sb_ifc_x.grid(row=1, column=0, sticky="ew")
+
+        self.lst_ifc.config(
+            yscrollcommand=sb_ifc_y.set,
+            xscrollcommand=sb_ifc_x.set
+        )
 
         # ---------- RULES ----------
         frm_modes = ttk.LabelFrame(top_area, text=" Наборы правил ", padding=12, style="Card.TLabelframe")
@@ -1023,6 +1058,13 @@ class App(tk.Tk):
             command=self.open_reports_folder,
             style="Secondary.TButton"
         ).pack(side="right")
+
+        ttk.Button(
+            frm_opts,
+            text="Папка сохранения отчётов…",
+            command=self.pick_reports_folder,
+            style="Secondary.TButton"
+        ).pack(side="right", padx=(0, 8))
 
         # Progress card
         frm_prog = ttk.LabelFrame(content, text=" Статус ", padding=12, style="Card.TLabelframe")
@@ -1178,12 +1220,14 @@ class App(tk.Tk):
         self.current_rules_mode = self.profile.rules_mode
         self.rules_mode_var.set(self.current_rules_mode)
         self.create_summary.set(bool(self.profile.create_summary))
+        self.reports_dir_var.set(self.profile.reports_dir or "")
         self.ifc_paths = list(self.profile.ifc_paths)
         self._refresh_ifc_list()
 
     def _collect_ui_to_profile(self):
         self.profile.create_summary = bool(self.create_summary.get())
         self.profile.ifc_paths = list(self.ifc_paths)
+        self.profile.reports_dir = self.reports_dir_var.get().strip()
         self.profile.rules_mode = self.rules_mode_var.get()
 
     def _load_rules_for_mode(self, mode_title: str):
@@ -1328,17 +1372,83 @@ class App(tk.Tk):
     # ---------- IFC ----------
     def pick_ifcs(self):
         initial = self.profile.last_ifc_dir or str(Path.home())
+
         paths = filedialog.askopenfilenames(
             title="Выберите одну или несколько IFC моделей",
             filetypes=[("IFC files", "*.ifc;*.ifczip"), ("All files", "*.*")],
             initialdir=initial
         )
-        if paths:
-            self.ifc_paths = list(paths)
-            self.profile.ifc_paths = list(self.ifc_paths)
-            self._refresh_ifc_list()
+
+        if not paths:
+            return
+
+        self.ifc_paths = self._normalize_ifc_paths(paths)
+        self.profile.ifc_paths = list(self.ifc_paths)
+
+        self._refresh_ifc_list()
+
+        if self.ifc_paths:
             self.profile.last_ifc_dir = str(Path(self.ifc_paths[0]).parent)
-            self.cfg.save()
+
+        self.cfg.save()
+
+    def pick_ifc_folder(self):
+        initial = self.profile.last_ifc_dir or str(Path.home())
+
+        folder = filedialog.askdirectory(
+            title="Выберите папку с IFC моделями",
+            initialdir=initial
+        )
+
+        if not folder:
+            return
+
+        root = Path(folder)
+
+        found_files = []
+        found_files.extend(root.rglob("*.ifc"))
+        found_files.extend(root.rglob("*.ifczip"))
+
+        found_files = [
+            str(p)
+            for p in found_files
+            if p.is_file()
+        ]
+
+        if not found_files:
+            messagebox.showinfo(
+                "IFC не найдены",
+                "В выбранной папке и её вложенных папках не найдено файлов IFC."
+            )
+            return
+
+        self.ifc_paths = self._normalize_ifc_paths(found_files)
+        self.profile.ifc_paths = list(self.ifc_paths)
+        self.profile.last_ifc_dir = str(root)
+
+        self._refresh_ifc_list()
+        self.cfg.save()
+
+        messagebox.showinfo(
+            "Готово",
+            f"Найдено IFC-файлов: {len(self.ifc_paths)}"
+        )
+
+    def _normalize_ifc_paths(self, paths):
+        result = []
+
+        for p in paths:
+            try:
+                path = Path(p)
+                suffix = path.suffix.lower()
+
+                if suffix in (".ifc", ".ifczip") and path.exists():
+                    result.append(str(path))
+            except Exception:
+                pass
+
+        # убираем дубли и сортируем
+        return sorted(set(result), key=lambda x: x.lower())
 
     def clear_ifcs(self):
         self.ifc_paths = []
@@ -1346,13 +1456,43 @@ class App(tk.Tk):
         self._refresh_ifc_list()
         self.cfg.save()
 
-    def open_reports_folder(self):
-        if not self.ifc_paths:
-            messagebox.showinfo("Нет файлов", "Сначала выберите хотя бы один файл IFC.")
+    def get_reports_root_dir(self, ifc_path: str | None = None) -> Path:
+        reports_dir = self.profile.reports_dir.strip() if self.profile.reports_dir else ""
+
+        if reports_dir:
+            return Path(reports_dir)
+
+        if ifc_path:
+            return Path(ifc_path).parent / DEFAULT_REPORT_SUBFOLDER
+
+        if self.ifc_paths:
+            return Path(self.ifc_paths[0]).parent / DEFAULT_REPORT_SUBFOLDER
+
+        return Path.home() / DEFAULT_REPORT_SUBFOLDER
+
+    def pick_reports_folder(self):
+        initial = self.profile.reports_dir or self.profile.last_ifc_dir or str(Path.home())
+
+        folder = filedialog.askdirectory(
+            title="Выберите папку для сохранения отчётов",
+            initialdir=initial
+        )
+
+        if not folder:
             return
-        first_dir = Path(self.ifc_paths[0]).parent
-        target = first_dir / DEFAULT_REPORT_SUBFOLDER
-        target.mkdir(exist_ok=True)
+
+        self.profile.reports_dir = folder
+        self.reports_dir_var.set(folder)
+        self.cfg.save()
+
+        messagebox.showinfo(
+            "Папка выбрана",
+            f"Отчёты будут сохраняться сюда:\n{folder}"
+        )
+
+    def open_reports_folder(self):
+        target = self.get_reports_root_dir()
+        target.mkdir(parents=True, exist_ok=True)
         os.startfile(str(target))
 
     # ---------- run ----------
@@ -1410,9 +1550,10 @@ class App(tk.Tk):
                 name = Path(ifc_path).name
                 model = open_ifc(ifc_path)
                 site_data = get_ifc_site_data(model)
+                qty = get_ifc_elements_count(model)
 
                 ifc_p = Path(ifc_path)
-                root_dir = ifc_p.parent / DEFAULT_REPORT_SUBFOLDER
+                root_dir = self.get_reports_root_dir(ifc_path)
                 mssk_dir = root_dir / SUB_MSSK
                 disc_dir = root_dir / SUB_DISC
                 mssk_dir.mkdir(parents=True, exist_ok=True)
@@ -1439,6 +1580,7 @@ class App(tk.Tk):
                 }
 
                 item.update(site_data)
+                item["qty"] = qty
 
                 if common_specs:
                     try:
@@ -1472,7 +1614,7 @@ class App(tk.Tk):
                 model = open_ifc(ifc_path)
 
                 ifc_p = Path(ifc_path)
-                root_dir = ifc_p.parent / DEFAULT_REPORT_SUBFOLDER
+                root_dir = self.get_reports_root_dir(ifc_path)
                 disc_dir = root_dir / SUB_DISC
                 disc_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1514,10 +1656,9 @@ class App(tk.Tk):
                         item["disc"] = html_d
                         item["disc_pct"] = pct_d
                         item["disc_code"] = ""
-                        item["site_building_pct"] = _named_block_percent_from_html(html_d, "Участок застройки")
-                        item["building_pct"] = _named_block_percent_from_html(html_d, "Здание (сооружение)")
-                        item["storey_pct"] = _named_block_percent_from_html(html_d, "Этаж (уровень)")
-                        item["qty"] = _requirements_passed_from_html(html_d)
+                        item["site_building_pct"] = _ifc_class_percent_from_html(html_d, "IfcSite")
+                        item["building_pct"] = _ifc_class_percent_from_html(html_d, "IfcBuilding")
+                        item["storey_pct"] = _ifc_class_percent_from_html(html_d, "IfcBuildingStorey")
                         if self.open_after.get() and html_d:
                             try:
                                 os.startfile(str(html_d))

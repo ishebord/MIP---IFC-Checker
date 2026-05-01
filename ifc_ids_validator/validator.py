@@ -102,6 +102,16 @@ def _get_map_conversion(model):
         pass
     return None
 
+def get_ifc_elements_count(model) -> str:
+    """
+    Возвращает количество физических элементов в IFC-модели.
+    Считаем IfcElement — стены, перекрытия, двери, окна, инженерные элементы и т.п.
+    """
+    try:
+        return str(len(model.by_type("IfcElement")))
+    except Exception:
+        return "—"
+
 def get_ifc_site_data(model) -> Dict[str, Optional[str]]:
     """
     Возвращает данные площадки:
@@ -264,98 +274,60 @@ def _percent_from_html(html_path: Path) -> Optional[float]:
 
     return None
 
-
-def _requirements_passed_from_html(html_path: Path) -> Optional[str]:
-    try:
-        text = html_path.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        return None
-
-    total = 0
-
-    if HAVE_BS4:
-        try:
-            soup = BeautifulSoup(text, "html.parser")
-            spans = soup.find_all("span", class_="item")
-
-            for span in spans:
-                span_text = span.get_text(" ", strip=True).lower()
-                if "elements passed" not in span_text:
-                    continue
-
-                strong = span.find_all("strong")
-                if len(strong) >= 2:
-                    b = strong[1].get_text(strip=True)
-                    if b.isdigit():
-                        total += int(b)
-
-            return str(total)
-        except Exception:
-            pass
-
-    pattern = re.compile(
-        r'Elements\s+passed:\s*<strong>\s*\d+\s*</strong>\s*/\s*<strong>\s*(\d+)\s*</strong>',
-        re.IGNORECASE
-    )
-
-    matches = pattern.findall(text)
-    if matches:
-        total = sum(int(x) for x in matches)
-        return str(total)
-
-    return None
-
-
-def _named_block_percent_from_html(html_path: Path, title_part: str) -> Optional[str]:
+def _ifc_class_percent_from_html(html_path: Path, ifc_class: str) -> Optional[str]:
     """
-    Ищет в HTML блок <div class="info">, внутри которого заголовок h2
-    содержит title_part, и возвращает процент из блока percent, например '87%'.
+    Ищет в HTML блок спецификации, где в Applicability есть:
+    All IfcBuilding data / All IfcSite data / All IfcBuildingStorey data
+
+    Возвращает процент из этого блока, например '100%'.
     """
     try:
         text = html_path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return None
 
+    target = f"All {ifc_class} data".lower()
+
     if HAVE_BS4:
         try:
             soup = BeautifulSoup(text, "html.parser")
-            info_blocks = soup.find_all("div", class_=lambda c: c and "info" in c)
 
-            for block in info_blocks:
-                h2 = block.find("h2")
-                if not h2:
+            sections = soup.find_all("section", class_=lambda c: c and "specification" in c)
+
+            for section in sections:
+                section_text = section.get_text(" ", strip=True).lower()
+
+                if target not in section_text:
                     continue
 
-                h2_text = h2.get_text(" ", strip=True)
-                if title_part.lower() not in h2_text.lower():
-                    continue
-
-                percent_div = block.find("div", class_=lambda c: c and "percent" in c)
+                percent_div = section.find("div", class_=lambda c: c and "percent" in c)
                 if percent_div:
                     percent_text = percent_div.get_text(" ", strip=True)
                     m = _percent_num_re.search(percent_text)
                     if m:
                         return f"{m.group(1)}%"
+
             return None
         except Exception:
             pass
 
-    info_iter = re.finditer(
-        r'<div[^>]*class="[^"]*\binfo\b[^"]*"[^>]*>',
+    # fallback без BeautifulSoup
+    section_iter = re.finditer(
+        r'<section[^>]*class="[^"]*\bspecification\b[^"]*"[^>]*>',
         text,
         flags=re.IGNORECASE
     )
 
-    for m_info in info_iter:
-        start = m_info.start()
-        fragment = text[start:start + 5000]
+    starts = [m.start() for m in section_iter]
+    starts.append(len(text))
 
-        h2_match = re.search(r'<h2[^>]*>(.*?)</h2>', fragment, flags=re.IGNORECASE | re.DOTALL)
-        if not h2_match:
-            continue
+    for i in range(len(starts) - 1):
+        fragment = text[starts[i]:starts[i + 1]]
 
-        h2_text = re.sub(r"<.*?>", "", h2_match.group(1)).strip()
-        if title_part.lower() not in h2_text.lower():
+        plain = re.sub(r"<.*?>", " ", fragment)
+        plain = re.sub(r"\s+", " ", plain).strip().lower()
+
+        if target not in plain:
             continue
 
         percent_match = re.search(
@@ -363,6 +335,7 @@ def _named_block_percent_from_html(html_path: Path, title_part: str) -> Optional
             fragment,
             flags=re.IGNORECASE | re.DOTALL
         )
+
         if percent_match:
             return f"{percent_match.group(1)}%"
 

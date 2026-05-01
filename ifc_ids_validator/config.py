@@ -117,11 +117,12 @@ class Profile:
     name: str
     last_ifc_dir: str = ""
     ifc_paths: List[str] = field(default_factory=list)
+    reports_dir: str = ""
     common_ids_path: str = ""
     disc_rules: List[DisciplineRule] = field(default_factory=list)
     create_summary: bool = True
     rules_mode: str = "Приказ 64"
-    section_descriptions: List[List[str]] = field(default_factory=list)
+    section_descriptions: List[List[str]] = field(default_factory=list)    
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "Profile":
@@ -129,6 +130,7 @@ class Profile:
             name=d.get("name", "Project"),
             last_ifc_dir=d.get("last_ifc_dir", ""),
             ifc_paths=list(d.get("ifc_paths", [])),
+            reports_dir=d.get("reports_dir", ""),
             common_ids_path="",
             disc_rules=[],
             create_summary=bool(d.get("create_summary", True)),
@@ -140,6 +142,7 @@ class Profile:
         return {
             "last_ifc_dir": self.last_ifc_dir,
             "ifc_paths": list(self.ifc_paths),
+            "reports_dir": self.reports_dir,
             "create_summary": bool(self.create_summary),
             "rules_mode": self.rules_mode,
         }

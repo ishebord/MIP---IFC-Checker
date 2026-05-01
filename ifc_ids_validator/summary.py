@@ -40,44 +40,45 @@ def _majority_value(items: List[Dict[str, Any]], key: str) -> str:
     values = [v for v in values if v]
     if not values:
         return ""
+
     cnt = Counter(values)
     value, amount = cnt.most_common(1)[0]
 
     if amount < 2:
         return ""
+
     return value
 
 
-def _cell_html(value: str, majority: str) -> str:
+def _cell_html(value: str, majority: str, css_class: str = "") -> str:
     value = value or "—"
+    cls = css_class
 
-    if not majority:
-        return f"<td>{value}</td>"
+    if majority:
+        if value == "—" or value != majority:
+            cls = (cls + " error-cell").strip()
 
-    if value == "—":
-        return "<td class='error-cell'>—</td>"
-
-    if value != majority:
-        return f"<td class='error-cell'>{value}</td>"
-
-    return f"<td>{value}</td>"
+    class_attr = f" class='{cls}'" if cls else ""
+    return f"<td{class_attr}>{value}</td>"
 
 
-def _pct_badge(value: str) -> str:
+def _pct_badge(value: str, css_class: str = "") -> str:
     if not value or value == "—":
-        return "<td>—</td>"
+        class_attr = f" class='{css_class}'" if css_class else ""
+        return f"<td{class_attr}>—</td>"
 
     v = value.replace("%", "").strip()
 
     try:
         num = float(v)
     except Exception:
-        return f"<td class='badge-red'>{value}</td>"
+        cls = (css_class + " badge-red").strip()
+        return f"<td class='{cls}'>{value}</td>"
 
-    if num == 100:
-        return f"<td><span class='badge badge-green'>{value}</span></td>"
-    else:
-        return f"<td><span class='badge badge-red'>{value}</span></td>"
+    badge_class = "badge-green" if num == 100 else "badge-red"
+    class_attr = f" class='{css_class}'" if css_class else ""
+
+    return f"<td{class_attr}><span class='badge {badge_class}'>{value}</span></td>"
 
 
 def _build_description_lookup(section_descriptions: List[List[str]] | None) -> List[tuple[str, str]]:
@@ -98,7 +99,6 @@ def _build_description_lookup(section_descriptions: List[List[str]] | None) -> L
 
         result.append((code.upper(), desc))
 
-    # Сначала ищем более длинные коды, чтобы "ЭОМ" не перебивалось "ЭО"
     result.sort(key=lambda x: len(x[0]), reverse=True)
     return result
 
@@ -127,7 +127,6 @@ def _model_description(model_name: str, section_descriptions: List[List[str]] | 
         if any(p in normalized for p in patterns):
             return desc
 
-        # Дополнительная проверка для случаев без явных разделителей
         if code in model_upper:
             return desc
 
@@ -140,9 +139,9 @@ def write_summary(
     project_name: str = "",
     section_descriptions: List[List[str]] | None = None,
 ):
-    """Перезаписывает сводный отчёт. Ссылки делаем относительно outfile.parent."""
     base = outfile.parent
     title = "Сводный IDS отчёт"
+
     if project_name:
         title = f"Сводный IDS отчёт по проекту {project_name}"
 
@@ -154,6 +153,7 @@ def write_summary(
     maj_lon = _majority_value(items, "lon")
 
     rows = []
+
     for it in items:
         model = it.get("model", "")
         description = _model_description(model, section_descriptions)
@@ -164,6 +164,7 @@ def write_summary(
         common_pct = it.get("common_pct")
         disc_html = it.get("disc")
         disc_pct = it.get("disc_pct")
+
         site_building_pct = it.get("site_building_pct") or "—"
         building_pct = it.get("building_pct") or "—"
         storey_pct = it.get("storey_pct") or "—"
@@ -178,7 +179,7 @@ def write_summary(
         d_href = _rel(base, disc_html)
 
         c_cell = f'<a class="link" href="{c_href}">{_pct(common_pct)}</a>' if c_href else "—"
-        d_label = f"Дисциплина — {_pct(disc_pct)}" if d_href else "—"
+        d_label = _pct(disc_pct) if d_href else "—"
         d_cell = f'<a class="link" href="{d_href}">{d_label}</a>' if d_href else "—"
 
         rows.append(
@@ -189,196 +190,334 @@ def write_summary(
             f"<td style='text-align:center'>{c_cell}</td>"
             f"<td>{d_cell}</td>"
             f"{_cell_html(site_name, maj_site)}"
-            f"{_cell_html(x, maj_x)}"
-            f"{_cell_html(y, maj_y)}"
-            f"{_cell_html(z, maj_z)}"
-            f"{_cell_html(lat, maj_lat)}"
-            f"{_cell_html(lon, maj_lon)}"
-            f"{_pct_badge(site_building_pct)}"
-            f"{_pct_badge(building_pct)}"
-            f"{_pct_badge(storey_pct)}"
+            f"{_cell_html(x, maj_x, 'group-coords')}"
+            f"{_cell_html(y, maj_y, 'group-coords')}"
+            f"{_cell_html(z, maj_z, 'group-coords')}"
+            f"{_cell_html(lat, maj_lat, 'group-geo')}"
+            f"{_cell_html(lon, maj_lon, 'group-geo')}"
+            f"{_pct_badge(site_building_pct, 'group-ifc')}"
+            f"{_pct_badge(building_pct, 'group-ifc')}"
+            f"{_pct_badge(storey_pct, 'group-ifc')}"
             f"</tr>"
         )
 
     html = f"""<!doctype html>
-        <html lang="ru">
-        <head>
-        <meta charset="utf-8">
-        <title>{title}</title>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
 
-        <style>
-        :root {{
-            --bg: #f5f7fb;
-            --card: #ffffff;
-            --text: #1f2937;
-            --muted: #6b7280;
-            --border: #e5e7eb;
-            --accent: #3b82f6;
-            --green: #10b981;
-            --red: #ef4444;
+<style>
+:root {{
+    --bg: #f5f7fb;
+    --card: #ffffff;
+    --text: #1f2937;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #3b82f6;
+    --green: #10b981;
+    --red: #ef4444;
+}}
+
+body {{
+    margin: 0;
+    background: var(--bg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial;
+    color: var(--text);
+}}
+
+.container {{
+    max-width: 2200px;
+    margin: 40px auto;
+    padding: 0 12px;
+}}
+
+.card {{
+    background: var(--card);
+    border-radius: 16px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+    padding: 24px;
+}}
+
+h1 {{
+    margin: 0 0 10px;
+    font-size: 26px;
+}}
+
+.meta {{
+    color: var(--muted);
+    font-size: 13px;
+    margin-bottom: 16px;
+}}
+
+.column-controls {{
+    margin-bottom: 14px;
+    padding: 10px 12px;
+    background: #f9fafb;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    font-size: 14px;
+}}
+
+.column-controls label {{
+    margin-right: 18px;
+    cursor: pointer;
+    user-select: none;
+}}
+
+.table-wrap {{
+    overflow-x: auto;
+}}
+
+table {{
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    overflow: hidden;
+    border-radius: 12px;
+}}
+
+thead {{
+    background: #f9fafb;
+}}
+
+th {{
+    text-align: left;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 12px;
+    border-bottom: 1px solid var(--border);
+    white-space: normal;
+}}
+
+td {{
+    padding: 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 14px;
+    vertical-align: middle;
+    word-break: break-word;
+}}
+
+tr:hover td {{
+    background: #f9fbff;
+}}
+
+.center {{
+    text-align: center;
+}}
+
+.badge {{
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    display: inline-block;
+}}
+
+.badge-green {{
+    background: rgba(16,185,129,0.1);
+    color: var(--green);
+}}
+
+.badge-red {{
+    background: rgba(239,68,68,0.1);
+    color: var(--red);
+}}
+
+.link {{
+    text-decoration: none;
+    font-weight: 600;
+    color: var(--accent);
+}}
+
+.link:hover {{
+    text-decoration: underline;
+}}
+
+.error-cell {{
+    background: #ffe4e6 !important;
+    color: #991b1b;
+    font-weight: 600;
+    border-radius: 6px;
+}}
+
+.model-name {{
+    font-weight: 600;
+}}
+
+.footer {{
+    margin-top: 20px;
+    font-size: 12px;
+    color: var(--muted);
+    text-align: right;
+}}
+
+.sortable {{
+    cursor: pointer;
+    user-select: none;
+}}
+
+.sortable:hover {{
+    background: #eef4ff;
+}}
+</style>
+</head>
+
+<body>
+<div class="container">
+<div class="card">
+
+<h1>{title}</h1>
+<div class="meta">Создан: {datetime.now().strftime("%Y-%m-%d %H:%M")}</div>
+
+<div class="column-controls">
+    <label><input type="checkbox" data-group="coords"> Координаты (X/Y/Z)</label>
+    <label><input type="checkbox" data-group="geo"> География (Lat/Lon)</label>
+    <label><input type="checkbox" checked data-group="ifc"> IFC структура</label>
+</div>
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+<th class="sortable" data-type="text" data-col="0">Модель ▲</th>
+<th>Описание</th>
+<th class="sortable" data-type="number" data-col="2">Кол-во элементов</th>
+<th class="sortable center" data-type="percent" data-col="3">МССК</th>
+<th class="sortable" data-type="percent" data-col="4">Дисциплина</th>
+<th>Площадка</th>
+<th class="group-coords">Global X</th>
+<th class="group-coords">Global Y</th>
+<th class="group-coords">Global Z</th>
+<th class="group-geo">RefLatitude</th>
+<th class="group-geo">RefLongitude</th>
+<th class="group-ifc">IfcSite – Участок застройки</th>
+<th class="group-ifc">IfcBuilding - Здание (сооружение)</th>
+<th class="group-ifc">IfcBuildingStorey - Этаж (уровень)</th>
+</tr>
+</thead>
+
+<tbody>
+{''.join(rows)}
+</tbody>
+</table>
+</div>
+
+<div class="footer">
+IFC → IDS Validator
+</div>
+
+</div>
+</div>
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {{
+    const table = document.querySelector("table");
+    const tbody = table.querySelector("tbody");
+    const headers = table.querySelectorAll("th.sortable");
+
+    let currentSort = {{
+        col: 0,
+        direction: "asc"
+    }};
+
+    function cleanText(value) {{
+        return (value || "")
+            .replace("▲", "")
+            .replace("▼", "")
+            .replace("%", "")
+            .replace("—", "")
+            .trim();
+    }}
+
+    function getCellValue(row, col, type) {{
+        const cell = row.children[col];
+        if (!cell) return "";
+
+        const raw = cleanText(cell.innerText);
+
+        if (type === "number" || type === "percent") {{
+            const num = parseFloat(raw.replace(",", "."));
+            return isNaN(num) ? -1 : num;
         }}
 
-        body {{
-            margin: 0;
-            background: var(--bg);
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial;
-            color: var(--text);
+        return raw.toLowerCase();
+    }}
+
+    function sortTable(col, type, direction) {{
+        const rows = Array.from(tbody.querySelectorAll("tr"));
+
+        rows.sort((a, b) => {{
+            const av = getCellValue(a, col, type);
+            const bv = getCellValue(b, col, type);
+
+            if (typeof av === "number" && typeof bv === "number") {{
+                return direction === "asc" ? av - bv : bv - av;
+            }}
+
+            return direction === "asc"
+                ? String(av).localeCompare(String(bv), "ru")
+                : String(bv).localeCompare(String(av), "ru");
+        }});
+
+        rows.forEach(row => tbody.appendChild(row));
+
+        headers.forEach(h => {{
+            h.textContent = h.textContent.replace(" ▲", "").replace(" ▼", "");
+        }});
+
+        const active = Array.from(headers).find(h => Number(h.dataset.col) === col);
+
+        if (active) {{
+            active.textContent += direction === "asc" ? " ▲" : " ▼";
         }}
 
-        .container {{
-            max-width: 2200px;
-            margin: 40px auto;
-            padding: 0 12px;
-        }}
+        currentSort.col = col;
+        currentSort.direction = direction;
+    }}
 
-        .card {{
-            background: var(--card);
-            border-radius: 16px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.08);
-            padding: 24px;
-        }}
+    headers.forEach(header => {{
+        header.addEventListener("click", function () {{
+            const col = Number(this.dataset.col);
+            const type = this.dataset.type;
 
-        h1 {{
-            margin: 0 0 10px;
-            font-size: 26px;
-        }}
+            let direction = "asc";
 
-        .meta {{
-            color: var(--muted);
-            font-size: 13px;
-            margin-bottom: 20px;
-        }}
+            if (currentSort.col === col) {{
+                direction = currentSort.direction === "asc" ? "desc" : "asc";
+            }}
 
-        .table-wrap {{
-            overflow-x: auto;
-        }}
+            sortTable(col, type, direction);
+        }});
+    }});
 
-        table {{
-            width: 100%;
-            border-collapse: separate;
-            border-spacing: 0;
-            overflow: hidden;
-            border-radius: 12px;
-        }}
+    document.querySelectorAll("input[type=checkbox][data-group]").forEach(cb => {{
+        cb.addEventListener("change", function () {{
+            const group = this.dataset.group;
+            const visible = this.checked;
 
-        thead {{
-            background: #f9fafb;
-        }}
+            document.querySelectorAll(".group-" + group).forEach(el => {{
+                el.style.display = visible ? "" : "none";
+            }});
+        }});
+    }});
 
-        th {{
-            text-align: left;
-            font-size: 13px;
-            font-weight: 600;
-            padding: 12px;
-            border-bottom: 1px solid var(--border);
-            white-space: normal;
-        }}
+    // применяем начальную видимость колонок
+    document.querySelectorAll("input[type=checkbox][data-group]").forEach(cb => {{
+        const group = cb.dataset.group;
+        const visible = cb.checked;
 
-        td {{
-            padding: 12px;
-            border-bottom: 1px solid var(--border);
-            font-size: 14px;
-            vertical-align: middle;
-            word-break: break-word;
-        }}
+        document.querySelectorAll(".group-" + group).forEach(el => {{
+            el.style.display = visible ? "" : "none";
+        }});
+    }});
 
-        tr:hover td {{
-            background: #f9fbff;
-        }}
+    sortTable(0, "text", "asc");
+}});
+</script>
 
-        .center {{
-            text-align: center;
-        }}
+</body>
+</html>
+"""
 
-        .badge {{
-            padding: 4px 10px;
-            border-radius: 999px;
-            font-size: 12px;
-            font-weight: 600;
-            display: inline-block;
-        }}
-
-        .badge-green {{
-            background: rgba(16,185,129,0.1);
-            color: var(--green);
-        }}
-
-        .badge-red {{
-            background: rgba(239,68,68,0.1);
-            color: var(--red);
-        }}
-
-        .link {{
-            text-decoration: none;
-            font-weight: 600;
-            color: var(--accent);
-        }}
-
-        .link:hover {{
-            text-decoration: underline;
-        }}
-
-        .error-cell {{
-            background: #ffe4e6 !important;
-            color: #991b1b;
-            font-weight: 600;
-            border-radius: 6px;
-        }}
-
-        .model-name {{
-            font-weight: 600;
-        }}
-
-        .footer {{
-            margin-top: 20px;
-            font-size: 12px;
-            color: var(--muted);
-            text-align: right;
-        }}
-        </style>
-        </head>
-
-        <body>
-        <div class="container">
-        <div class="card">
-
-        <h1>{title}</h1>
-        <div class="meta">Создан: {datetime.now().strftime("%Y-%m-%d %H:%M")}</div>
-
-        <div class="table-wrap">
-        <table>
-        <thead>
-        <tr>
-        <th>Модель</th>
-        <th>Описание</th>
-        <th>Кол-во элементов</th>
-        <th class="center">МССК</th>
-        <th>Дисциплина</th>
-        <th>Площадка</th>
-        <th>Global X</th>
-        <th>Global Y</th>
-        <th>Global Z</th>
-        <th>RefLatitude</th>
-        <th>RefLongitude</th>
-        <th>IfcSite – Участок застройки</th>
-        <th>IfcBuilding - Здание (сооружение)</th>
-        <th>IfcBuildingStorey - Этаж (уровень)</th>
-        </tr>
-        </thead>
-
-        <tbody>
-        {''.join(rows)}
-        </tbody>
-        </table>
-        </div>
-
-        <div class="footer">
-        IFC → IDS Validator
-        </div>
-
-        </div>
-        </div>
-        </body>
-        </html>
-        """
     outfile.write_text(html, encoding="utf-8")
