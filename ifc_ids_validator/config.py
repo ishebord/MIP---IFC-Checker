@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # config.py
 from __future__ import annotations
 import json
