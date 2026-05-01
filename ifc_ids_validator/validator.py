@@ -34,7 +34,7 @@ def match_rule(filename: str, rules: List[Dict], mode: str = MATCH_CONTAINS) -> 
     for r in rules or []:
         patt = (r.get("pattern") or "").lower()
         if patt and patt in name:
-            return r, (r.get("code") or "disc")
+            return r, None
     return None, None
 
 
@@ -390,29 +390,26 @@ def _run_ifctester_cli(ids_path: str, ifc_path: str, report: str, out_dir: Path)
 
 
 # ----------------------------- reports ------------------------------
-def emit_reports(specs, out_base: Path, ids_path: str, ifc_path: str) -> Tuple[Path, Path, Optional[float]]:
+def emit_reports(specs, out_base: Path, ids_path: str, ifc_path: str) -> Tuple[Path, Optional[float]]:
     """
-    Генерирует HTML и JSON для переданных specs.
-    out_base: базовый путь без расширения (например: .../МССК/<stem>
-              или .../Дисциплинарные/<stem>.__КОД)
-    Возвращает: (html_path, json_path, percent) — percent берём из HTML Summary.
+    Генерирует только HTML-отчёт для переданных specs.
+    out_base: базовый путь без расширения.
+    Возвращает: (html_path, percent) — percent берём из HTML Summary.
     """
     out_base = Path(out_base)
     out_dir = out_base.parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
     target_html = out_base.with_suffix(".html")
-    target_json = out_base.with_suffix(".json")
 
-    for p in (target_html, target_json):
-        try:
-            if p.exists():
-                p.unlink()
-        except Exception:
-            pass
+    try:
+        if target_html.exists():
+            target_html.unlink()
+    except Exception:
+        pass
 
     html_ok = False
-    json_ok = False
+
     if HAVE_REPORTER:
         try:
             h = reporter.Html(specs)
@@ -422,39 +419,20 @@ def emit_reports(specs, out_base: Path, ids_path: str, ifc_path: str) -> Tuple[P
         except Exception:
             html_ok = False
 
-        try:
-            j = reporter.Json(specs)
-            j.report()
-            j.to_file(str(target_json))
-            json_ok = target_json.exists()
-        except Exception:
-            json_ok = False
-
     if not html_ok:
         try:
             stem = Path(ifc_path).stem
             tmp_html = out_dir / f"{stem}.html"
             if tmp_html.exists():
                 tmp_html.unlink()
+
             _run_ifctester_cli(ids_path, ifc_path, "Html", out_dir)
+
             if tmp_html.exists():
                 tmp_html.replace(target_html)
                 html_ok = target_html.exists()
         except Exception:
             html_ok = False
 
-    if not json_ok:
-        try:
-            stem = Path(ifc_path).stem
-            tmp_json = out_dir / f"{stem}.json"
-            if tmp_json.exists():
-                tmp_json.unlink()
-            _run_ifctester_cli(ids_path, ifc_path, "Json", out_dir)
-            if tmp_json.exists():
-                tmp_json.replace(target_json)
-                json_ok = target_json.exists()
-        except Exception:
-            json_ok = False
-
     percent = _percent_from_html(target_html) if html_ok else None
-    return target_html, target_json, percent
+    return target_html, percent

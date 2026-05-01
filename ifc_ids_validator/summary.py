@@ -164,7 +164,6 @@ def write_summary(
         common_pct = it.get("common_pct")
         disc_html = it.get("disc")
         disc_pct = it.get("disc_pct")
-        disc_code = it.get("disc_code") or ""
         site_building_pct = it.get("site_building_pct") or "—"
         building_pct = it.get("building_pct") or "—"
         storey_pct = it.get("storey_pct") or "—"
@@ -179,7 +178,7 @@ def write_summary(
         d_href = _rel(base, disc_html)
 
         c_cell = f'<a class="link" href="{c_href}">{_pct(common_pct)}</a>' if c_href else "—"
-        d_label = f"Дисциплина ({disc_code}) — {_pct(disc_pct)}" if d_href else "—"
+        d_label = f"Дисциплина — {_pct(disc_pct)}" if d_href else "—"
         d_cell = f'<a class="link" href="{d_href}">{d_label}</a>' if d_href else "—"
 
         rows.append(

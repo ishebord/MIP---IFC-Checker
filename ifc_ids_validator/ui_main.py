@@ -57,7 +57,6 @@ class RuleDialog(tk.Toplevel):
         self.configure(bg=COLOR_BG)
 
         self.var_pattern = tk.StringVar(value=(initial.pattern if initial else ""))
-        self.var_code = tk.StringVar(value=(initial.code if initial else ""))
         self.var_ids = tk.StringVar(value=(initial.ids_path if initial else ""))
 
         outer = tk.Frame(self, bg=COLOR_BG, padx=16, pady=16)
@@ -94,20 +93,15 @@ class RuleDialog(tk.Toplevel):
         ttk.Entry(frm, textvariable=self.var_pattern, width=50)\
             .grid(row=0, column=1, columnspan=2, sticky="ew", pady=(0, 8))
 
-        ttk.Label(frm, text="Код дисциплины:", style="CardLabel.TLabel")\
-            .grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(frm, textvariable=self.var_code, width=20)\
-            .grid(row=1, column=1, sticky="ew", pady=4)
-
         ttk.Label(frm, text="IDS-файл дисциплины:", style="CardLabel.TLabel")\
-            .grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
+            .grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
         ttk.Entry(frm, textvariable=self.var_ids)\
-            .grid(row=2, column=1, sticky="ew", pady=4)
+            .grid(row=1, column=1, sticky="ew", pady=4)
         ttk.Button(frm, text="Выбрать…", command=self._pick_ids, style="Secondary.TButton")\
-            .grid(row=2, column=2, sticky="w", padx=(8, 0), pady=4)
+            .grid(row=1, column=2, sticky="w", padx=(8, 0), pady=4)
 
         btns = tk.Frame(frm, bg=COLOR_SURFACE)
-        btns.grid(row=3, column=0, columnspan=3, sticky="e", pady=(14, 0))
+        btns.grid(row=2, column=0, columnspan=3, sticky="e", pady=(14, 0))
 
         ttk.Button(btns, text="Отмена", width=14, command=self.destroy, style="Secondary.TButton").pack(side="right")
         ttk.Button(btns, text="OK", width=14, command=self._on_ok, style="Primary.TButton").pack(side="right", padx=(0, 8))
@@ -125,12 +119,17 @@ class RuleDialog(tk.Toplevel):
 
     def _on_ok(self):
         patt = self.var_pattern.get().strip()
-        code = self.var_code.get().strip()
         ids_path = self.var_ids.get().strip()
-        if not patt or not code or not ids_path:
-            messagebox.showwarning("Не заполнено", "Укажите паттерн, код и IDS-файл.")
+
+        if not patt or not ids_path:
+            messagebox.showwarning("Не заполнено", "Укажите паттерн и IDS-файл.")
             return
-        self.result = {"pattern": patt, "code": code, "ids_path": ids_path}
+
+        self.result = {
+            "pattern": patt,
+            "ids_path": ids_path
+        }
+
         self.destroy()
 
 
@@ -464,7 +463,7 @@ class RulesSettingsDialog(tk.Toplevel):
 
         self.var_common = tk.StringVar(value=self.profile.common_ids_path)
         self.local_rules = [
-            DisciplineRule(pattern=r.pattern, code=r.code, ids_path=r.ids_path)
+            DisciplineRule(pattern=r.pattern, ids_path=r.ids_path)
             for r in self.profile.disc_rules
         ]
         self.local_section_descriptions = [
@@ -597,7 +596,7 @@ class RulesSettingsDialog(tk.Toplevel):
     def refresh_rules(self):
         self.rules_list.delete(0, "end")
         for r in self.local_rules:
-            self.rules_list.insert("end", f"{r.pattern}  →  {r.code}  |  {r.ids_path}")
+            self.rules_list.insert("end", f"{r.pattern}  |  {r.ids_path}")
 
     def pick_common_ids(self):
         current = self.var_common.get().strip()
@@ -646,7 +645,7 @@ class RulesSettingsDialog(tk.Toplevel):
     def on_save(self):
         self.profile.common_ids_path = self.var_common.get().strip()
         self.profile.disc_rules = [
-            DisciplineRule(pattern=r.pattern, code=r.code, ids_path=r.ids_path)
+            DisciplineRule(pattern=r.pattern, ids_path=r.ids_path)
             for r in self.local_rules
         ]
         self.profile.section_descriptions = [
@@ -1446,13 +1445,13 @@ class App(tk.Tk):
                         self.ui_call(self.set_status, f"[{i}/{total}] МССК: {name}")
                         common_specs.validate(model)
                         out_base_common = mssk_dir / ifc_p.stem
-                        html_c, json_c, pct_c = emit_reports(common_specs, out_base_common, common_ids, ifc_path)
+                        html_c, pct_c = emit_reports(common_specs, out_base_common, common_ids, ifc_path)
                         self.ui_call(self.log, f"✅ МССК отчёт: {html_c}")
                         item["common"] = html_c
                         item["common_pct"] = pct_c
                         if open_after and html_c:
                             try:
-                                webbrowser.open(html_c.as_uri())
+                                os.startfile(str(html_c))
                             except Exception:
                                 pass
                     except Exception as e:
@@ -1503,29 +1502,29 @@ class App(tk.Tk):
                     item.update(get_ifc_site_data(model))
 
                 rules = [r.__dict__ for r in self.profile.disc_rules]
-                rule, code = match_rule(name, rules, self.cfg.match_mode)
+                rule, _ = match_rule(name, rules, self.cfg.match_mode)
                 if rule:
                     d_ids = (rule.get("ids_path") or "").strip()
                     try:
                         d_specs = open_ids(d_ids)
                         d_specs.validate(model)
-                        out_base_disc = disc_dir / f"{ifc_p.stem}.__{code}"
-                        html_d, json_d, pct_d = emit_reports(d_specs, out_base_disc, d_ids, ifc_path)
-                        self.ui_call(self.log, f"✅ Дисциплина ({code}): {html_d}")
+                        out_base_disc = disc_dir / f"{ifc_p.stem}"
+                        html_d, pct_d = emit_reports(d_specs, out_base_disc, d_ids, ifc_path)
+                        self.ui_call(self.log, f"✅ Дисциплина: {html_d}")
                         item["disc"] = html_d
                         item["disc_pct"] = pct_d
-                        item["disc_code"] = code
+                        item["disc_code"] = ""
                         item["site_building_pct"] = _named_block_percent_from_html(html_d, "Участок застройки")
                         item["building_pct"] = _named_block_percent_from_html(html_d, "Здание (сооружение)")
                         item["storey_pct"] = _named_block_percent_from_html(html_d, "Этаж (уровень)")
                         item["qty"] = _requirements_passed_from_html(html_d)
                         if self.open_after.get() and html_d:
                             try:
-                                webbrowser.open(html_d.as_uri())
+                                os.startfile(str(html_d))
                             except Exception:
                                 pass
                     except Exception as e:
-                        self.ui_call(self.log, f"❌ Ошибка дисциплины ({code}): {e}")
+                        self.ui_call(self.log, f"❌ Ошибка дисциплины: {e}")
                 else:
                     self.ui_call(self.log, "🟡 Правило дисциплины не найдено (пропуск).")
 
@@ -1545,7 +1544,7 @@ class App(tk.Tk):
                     )
                     self.ui_call(self.log, f"🆗 Сводный отчёт: {s_path}")
                     try:
-                        webbrowser.open(s_path.as_uri())
+                        os.startfile(str(s_path))
                     except Exception:
                         pass
                 except Exception as e:
