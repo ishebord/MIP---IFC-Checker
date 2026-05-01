@@ -9,6 +9,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
 from tkinter import ttk
 import traceback
+import sys
+import subprocess
 
 from ifc_ids_validator.config import (
     AppConfig, DisciplineRule, Profile, CONF_PATH,
@@ -673,6 +675,8 @@ class App(tk.Tk):
         self.is_running = False
         self.ui_queue = queue.Queue()
 
+        self.game_process = None
+
         self.cfg: AppConfig = AppConfig.load()
         self.profile: Profile = self.cfg.get_active()
         self.current_rules_mode = self.profile.rules_mode
@@ -1074,10 +1078,43 @@ class App(tk.Tk):
         self.lbl_progress.pack(fill="x")
         self.pb = ttk.Progressbar(frm_prog, orient="horizontal", mode="determinate", style="Corp.Horizontal.TProgressbar")
         self.pb.pack(fill="x", pady=(8, 0), ipady=5)
+        
+        # Log
+        log_game = tk.Frame(content, bg=COLOR_BG)
+        log_game.grid(row=2, column=0, sticky="nsew")
+        log_game.grid_columnconfigure(0, weight=1)
+        log_game.grid_columnconfigure(1, weight=0)
+        log_game.grid_rowconfigure(0, weight=1)
 
         # Log card
-        frm_log = ttk.LabelFrame(content, text=" Журнал ", padding=12, style="Card.TLabelframe")
-        frm_log.grid(row=2, column=0, sticky="nsew")
+        frm_log = ttk.LabelFrame(log_game, text=" Журнал ", padding=12, style="Card.TLabelframe")
+        frm_log.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        frm_log.grid_columnconfigure(0, weight=1)
+        frm_log.grid_rowconfigure(0, weight=1)
+
+        text_wrap = tk.Frame(frm_log, bg=COLOR_SURFACE)
+        text_wrap.grid(row=0, column=0, sticky="nsew")
+        text_wrap.grid_columnconfigure(0, weight=1)
+        text_wrap.grid_rowconfigure(0, weight=1)
+
+        self.txt_log = tk.Text(
+            text_wrap,
+            height=13,
+            font=("Consolas", 10),
+            bg="white",
+            fg=COLOR_TEXT,
+            relief="flat",
+            wrap="word",
+            highlightthickness=1,
+            highlightbackground=COLOR_BORDER,
+            insertbackground=COLOR_TEXT
+        )
+        self.txt_log.grid(row=0, column=0, sticky="nsew")
+
+        sb_log = ttk.Scrollbar(text_wrap, orient="vertical", command=self.txt_log.yview)
+        sb_log.grid(row=0, column=1, sticky="ns")
+        self.txt_log.config(yscrollcommand=sb_log.set)       
+
         frm_log.grid_columnconfigure(0, weight=1)
         frm_log.grid_rowconfigure(0, weight=1)
 
@@ -1495,6 +1532,39 @@ class App(tk.Tk):
         target.mkdir(parents=True, exist_ok=True)
         os.startfile(str(target))
 
+    def start_game_process(self):
+        try:
+            if self.game_process and self.game_process.poll() is None:
+                return
+
+            game_path = Path(__file__).parent / "game.py"
+
+            if not game_path.exists():
+                self.log(f"⚠️ Игра не найдена: {game_path}")
+                return
+
+            creationflags = 0
+            if os.name == "nt":
+                creationflags = subprocess.CREATE_NO_WINDOW
+
+            self.game_process = subprocess.Popen(
+                [sys.executable, str(game_path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags
+            )
+
+        except Exception as e:
+            self.log(f"⚠️ Не удалось запустить игру: {e}")
+
+    def stop_game_process(self):
+        try:
+            if self.game_process and self.game_process.poll() is None:
+                self.game_process.terminate()
+                self.game_process = None
+        except Exception:
+            pass
+
     # ---------- run ----------
     def on_run(self):
         if self.is_running:
@@ -1518,6 +1588,8 @@ class App(tk.Tk):
         self.pb.config(value=0, maximum=len(self.ifc_paths) * 2)
         self.txt_log.delete("1.0", "end")
         self.set_status("Старт валидации…")
+
+        self.start_game_process()
 
         threading.Thread(target=self.worker_run_two_passes, daemon=True).start()
 
@@ -1703,6 +1775,7 @@ class App(tk.Tk):
 
     def on_close(self):
         try:
+            self.stop_game_process()
             self._collect_ui_to_profile()
             self.cfg.save()
         except Exception:
