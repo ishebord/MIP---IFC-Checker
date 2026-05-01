@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# ui_main.py
 from __future__ import annotations
 import os
 import queue
@@ -1446,7 +1447,7 @@ class App(tk.Tk):
                         self.ui_call(self.set_status, f"[{i}/{total}] МССК: {name}")
                         common_specs.validate(model)
                         out_base_common = mssk_dir / ifc_p.stem
-                        html_c, json_c, pct_c = emit_reports(common_specs, out_base_common, common_ids, ifc_path)
+                        html_c, pct_c = emit_reports(common_specs, out_base_common, common_ids, ifc_path)
                         self.ui_call(self.log, f"✅ МССК отчёт: {html_c}")
                         item["common"] = html_c
                         item["common_pct"] = pct_c
@@ -1510,7 +1511,7 @@ class App(tk.Tk):
                         d_specs = open_ids(d_ids)
                         d_specs.validate(model)
                         out_base_disc = disc_dir / f"{ifc_p.stem}.__{code}"
-                        html_d, json_d, pct_d = emit_reports(d_specs, out_base_disc, d_ids, ifc_path)
+                        html_d, pct_d = emit_reports(d_specs, out_base_disc, d_ids, ifc_path)
                         self.ui_call(self.log, f"✅ Дисциплина ({code}): {html_d}")
                         item["disc"] = html_d
                         item["disc_pct"] = pct_d
