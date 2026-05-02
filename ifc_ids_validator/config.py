@@ -110,6 +110,7 @@ def get_rules_path(mode: str) -> Path:
 class DisciplineRule:
     pattern: str
     ids_path: str
+    mapping_path: str = ""
 
 
 @dataclass

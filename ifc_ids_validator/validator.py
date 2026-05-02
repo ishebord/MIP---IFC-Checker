@@ -10,6 +10,8 @@ from typing import Dict, Tuple, Optional, List
 import ifcopenshell
 from ifctester import ids as ids_mod
 
+from ifc_ids_validator.report_postprocess import postprocess_html_report
+
 # reporter может отсутствовать на некоторых сборках
 try:
     from ifctester import reporter
@@ -363,11 +365,17 @@ def _run_ifctester_cli(ids_path: str, ifc_path: str, report: str, out_dir: Path)
 
 
 # ----------------------------- reports ------------------------------
-def emit_reports(specs, out_base: Path, ids_path: str, ifc_path: str) -> Tuple[Path, Optional[float]]:
+def emit_reports(
+    specs,
+    out_base: Path,
+    ids_path: str,
+    ifc_path: str,
+    mapping_path: str | None = None,
+) -> Tuple[Path, Optional[float]]:
     """
-    Генерирует только HTML-отчёт для переданных specs.
+    Генерирует HTML-отчёт для переданных specs.
     out_base: базовый путь без расширения.
-    Возвращает: (html_path, percent) — percent берём из HTML Summary.
+    mapping_path: путь к txt-файлу сопоставления параметров.
     """
     out_base = Path(out_base)
     out_dir = out_base.parent
@@ -396,6 +404,7 @@ def emit_reports(specs, out_base: Path, ids_path: str, ifc_path: str) -> Tuple[P
         try:
             stem = Path(ifc_path).stem
             tmp_html = out_dir / f"{stem}.html"
+
             if tmp_html.exists():
                 tmp_html.unlink()
 
@@ -406,6 +415,15 @@ def emit_reports(specs, out_base: Path, ids_path: str, ifc_path: str) -> Tuple[P
                 html_ok = target_html.exists()
         except Exception:
             html_ok = False
+
+    if html_ok and target_html.exists():
+        try:
+            postprocess_html_report(
+                target_html,
+                mapping_path=mapping_path,
+            )
+        except Exception as e:
+            print(f"[POSTPROCESS ERROR] {target_html}: {e}")
 
     percent = _percent_from_html(target_html) if html_ok else None
     return target_html, percent

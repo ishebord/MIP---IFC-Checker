@@ -61,6 +61,7 @@ class RuleDialog(tk.Toplevel):
 
         self.var_pattern = tk.StringVar(value=(initial.pattern if initial else ""))
         self.var_ids = tk.StringVar(value=(initial.ids_path if initial else ""))
+        self.var_mapping = tk.StringVar(value=(initial.mapping_path if initial else ""))
 
         outer = tk.Frame(self, bg=COLOR_BG, padx=16, pady=16)
         outer.pack(fill="both", expand=True)
@@ -77,6 +78,7 @@ class RuleDialog(tk.Toplevel):
         header = tk.Frame(card, bg=COLOR_BLUE, height=44)
         header.pack(fill="x")
         header.pack_propagate(False)
+
         tk.Label(
             header,
             text=title,
@@ -87,50 +89,128 @@ class RuleDialog(tk.Toplevel):
 
         frm = tk.Frame(card, padx=16, pady=16, bg=COLOR_SURFACE)
         frm.pack(fill="both", expand=True)
+
         frm.grid_columnconfigure(0, weight=0, minsize=230)
-        frm.grid_columnconfigure(1, weight=1, minsize=360)
+        frm.grid_columnconfigure(1, weight=1, minsize=420)
         frm.grid_columnconfigure(2, weight=0)
 
-        ttk.Label(frm, text="Паттерн в имени файла:", style="CardLabel.TLabel")\
-            .grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 4))
-        ttk.Entry(frm, textvariable=self.var_pattern, width=50)\
-            .grid(row=0, column=1, columnspan=2, sticky="ew", pady=(0, 8))
+        ttk.Label(
+            frm,
+            text="Паттерн в имени файла:",
+            style="CardLabel.TLabel"
+        ).grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 4))
 
-        ttk.Label(frm, text="IDS-файл дисциплины:", style="CardLabel.TLabel")\
-            .grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        ttk.Entry(frm, textvariable=self.var_ids)\
-            .grid(row=1, column=1, sticky="ew", pady=4)
-        ttk.Button(frm, text="Выбрать…", command=self._pick_ids, style="Secondary.TButton")\
-            .grid(row=1, column=2, sticky="w", padx=(8, 0), pady=4)
+        ttk.Entry(
+            frm,
+            textvariable=self.var_pattern,
+            width=60
+        ).grid(row=0, column=1, columnspan=2, sticky="ew", pady=(0, 8))
+
+        ttk.Label(
+            frm,
+            text="IDS-файл дисциплины:",
+            style="CardLabel.TLabel"
+        ).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+
+        ttk.Entry(
+            frm,
+            textvariable=self.var_ids
+        ).grid(row=1, column=1, sticky="ew", pady=4)
+
+        ttk.Button(
+            frm,
+            text="Выбрать…",
+            command=self._pick_ids,
+            style="Secondary.TButton"
+        ).grid(row=1, column=2, sticky="w", padx=(8, 0), pady=4)
+
+        ttk.Label(
+            frm,
+            text="Файл сопоставления параметров:",
+            style="CardLabel.TLabel"
+        ).grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
+
+        ttk.Entry(
+            frm,
+            textvariable=self.var_mapping
+        ).grid(row=2, column=1, sticky="ew", pady=4)
+
+        ttk.Button(
+            frm,
+            text="Выбрать…",
+            command=self._pick_mapping,
+            style="Secondary.TButton"
+        ).grid(row=2, column=2, sticky="w", padx=(8, 0), pady=4)
 
         btns = tk.Frame(frm, bg=COLOR_SURFACE)
-        btns.grid(row=2, column=0, columnspan=3, sticky="e", pady=(14, 0))
+        btns.grid(row=3, column=0, columnspan=3, sticky="e", pady=(14, 0))
 
-        ttk.Button(btns, text="Отмена", width=14, command=self.destroy, style="Secondary.TButton").pack(side="right")
-        ttk.Button(btns, text="OK", width=14, command=self._on_ok, style="Primary.TButton").pack(side="right", padx=(0, 8))
+        ttk.Button(
+            btns,
+            text="Отмена",
+            width=14,
+            command=self.destroy,
+            style="Secondary.TButton"
+        ).pack(side="right")
+
+        ttk.Button(
+            btns,
+            text="OK",
+            width=14,
+            command=self._on_ok,
+            style="Primary.TButton"
+        ).pack(side="right", padx=(0, 8))
 
         self.grab_set()
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
     def _pick_ids(self):
+        current = self.var_ids.get().strip()
+        initial_dir = str(Path(current).parent) if current else str(Path.home())
+
         path = filedialog.askopenfilename(
-            title="Выберите IDS спецификацию (дисциплина)",
-            filetypes=[("IDS files", "*.ids;*.xml"), ("All files", "*.*")]
+            title="Выберите IDS спецификацию дисциплины",
+            filetypes=[("IDS files", "*.ids;*.xml"), ("All files", "*.*")],
+            initialdir=initial_dir
         )
+
         if path:
             self.var_ids.set(path)
+
+    def _pick_mapping(self):
+        current = self.var_mapping.get().strip()
+        initial_dir = str(Path(current).parent) if current else str(Path.home())
+
+        path = filedialog.askopenfilename(
+            title="Выберите файл сопоставления параметров",
+            filetypes=[
+                ("Text files", "*.txt"),
+                ("CSV files", "*.csv"),
+                ("All files", "*.*"),
+            ],
+            initialdir=initial_dir
+        )
+
+        if path:
+            self.var_mapping.set(path)
 
     def _on_ok(self):
         patt = self.var_pattern.get().strip()
         ids_path = self.var_ids.get().strip()
+        mapping_path = self.var_mapping.get().strip()
 
         if not patt or not ids_path:
-            messagebox.showwarning("Не заполнено", "Укажите паттерн и IDS-файл.")
+            messagebox.showwarning(
+                "Не заполнено",
+                "Укажите паттерн и IDS-файл.",
+                parent=self
+            )
             return
 
         self.result = {
             "pattern": patt,
-            "ids_path": ids_path
+            "ids_path": ids_path,
+            "mapping_path": mapping_path,
         }
 
         self.destroy()
@@ -466,7 +546,11 @@ class RulesSettingsDialog(tk.Toplevel):
 
         self.var_common = tk.StringVar(value=self.profile.common_ids_path)
         self.local_rules = [
-            DisciplineRule(pattern=r.pattern, ids_path=r.ids_path)
+            DisciplineRule(
+                pattern=r.pattern,
+                ids_path=r.ids_path,
+                mapping_path=getattr(r, "mapping_path", "")
+            )
             for r in self.profile.disc_rules
         ]
         self.local_section_descriptions = [
@@ -598,8 +682,13 @@ class RulesSettingsDialog(tk.Toplevel):
 
     def refresh_rules(self):
         self.rules_list.delete(0, "end")
+
         for r in self.local_rules:
-            self.rules_list.insert("end", f"{r.pattern}  |  {r.ids_path}")
+            mapping_name = Path(r.mapping_path).name if r.mapping_path else "без сопоставления"
+            self.rules_list.insert(
+                "end",
+                f"{r.pattern}  |  IDS: {r.ids_path}  |  TXT: {mapping_name}"
+            )
 
     def pick_common_ids(self):
         current = self.var_common.get().strip()
@@ -647,15 +736,22 @@ class RulesSettingsDialog(tk.Toplevel):
 
     def on_save(self):
         self.profile.common_ids_path = self.var_common.get().strip()
+
         self.profile.disc_rules = [
-            DisciplineRule(pattern=r.pattern, ids_path=r.ids_path)
+            DisciplineRule(
+                pattern=r.pattern,
+                ids_path=r.ids_path,
+                mapping_path=getattr(r, "mapping_path", "")
+            )
             for r in self.local_rules
         ]
+
         self.profile.section_descriptions = [
             [str(row[0]), str(row[1])]
             for row in self.local_section_descriptions
             if len(row) >= 2
         ]
+
         self.result = True
         self.destroy()
 
@@ -1723,7 +1819,14 @@ class App(tk.Tk):
                         d_specs = open_ids(d_ids)
                         d_specs.validate(model)
                         out_base_disc = disc_dir / f"{ifc_p.stem}"
-                        html_d, pct_d = emit_reports(d_specs, out_base_disc, d_ids, ifc_path)
+                        mapping_path = (rule.get("mapping_path") or "").strip()
+                        html_d, pct_d = emit_reports(
+                            d_specs,
+                            out_base_disc,
+                            d_ids,
+                            ifc_path,
+                            mapping_path=mapping_path
+                        )
                         self.ui_call(self.log, f"✅ Дисциплина: {html_d}")
                         item["disc"] = html_d
                         item["disc_pct"] = pct_d
