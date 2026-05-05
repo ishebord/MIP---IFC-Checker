@@ -1698,8 +1698,9 @@ class App(tk.Tk):
         make_summary = bool(self.create_summary.get())
         common_ids = self.profile.common_ids_path
 
-        items_map: dict[str, dict] = {}
+        items = []
 
+        # IDS читаем один раз
         common_specs = None
         if common_ids:
             try:
@@ -1709,25 +1710,26 @@ class App(tk.Tk):
                 self.ui_call(self.log, f"! Ошибка чтения общей IDS: {e}")
                 common_specs = None
 
+        # Правила и дисциплинарные IDS кэшируем
+        rules = [r.__dict__ for r in self.profile.disc_rules]
+        discipline_specs_cache = {}
+
         try:
             for i, ifc_path in enumerate(self.ifc_paths, start=1):
                 if not self.is_running:
                     self.ui_call(self.set_status, "Остановлено пользователем.")
                     break
 
-                name = Path(ifc_path).name
-                model = open_ifc(ifc_path)
-                site_data = get_ifc_site_data(model)
-                qty = get_ifc_elements_count(model)
-
                 ifc_p = Path(ifc_path)
+                name = ifc_p.name
+
                 root_dir = self.get_reports_root_dir(ifc_path)
                 mssk_dir = root_dir / SUB_MSSK
                 disc_dir = root_dir / SUB_DISC
                 mssk_dir.mkdir(parents=True, exist_ok=True)
                 disc_dir.mkdir(parents=True, exist_ok=True)
 
-                item = items_map.get(ifc_path) or {
+                item = {
                     "model": name,
                     "site_name": None,
                     "x": None,
@@ -1747,130 +1749,126 @@ class App(tk.Tk):
                     "disc_code": None,
                 }
 
-                item.update(site_data)
-                item["qty"] = qty
+                try:
+                    self.ui_call(self.set_status, f"[{i}/{total}] Открытие IFC: {name}")
+                    model = open_ifc(ifc_path)
 
-                if common_specs:
-                    try:
-                        self.ui_call(self.set_status, f"[{i}/{total}] МССК: {name}")
-                        common_specs.validate(model)
-                        out_base_common = mssk_dir / ifc_p.stem
-                        html_c, pct_c = emit_reports(common_specs, out_base_common, common_ids, ifc_path)
-                        self.ui_call(self.log, f"✅ МССК отчёт: {html_c}")
-                        item["common"] = html_c
-                        item["common_pct"] = pct_c
-                        if open_after and html_c:
-                            try:
-                                os.startfile(str(html_c))
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        self.ui_call(self.log, f"❌ МССК ошибка: {e}")
-                else:
-                    self.ui_call(self.log, "🟡 Общая IDS не задана — PASS1 пропущен.")
-
-                items_map[ifc_path] = item
-                self.ui_call(self.pb.step, 1)
-
-            for j, ifc_path in enumerate(self.ifc_paths, start=1):
-                if not self.is_running:
-                    self.ui_call(self.set_status, "Остановлено пользователем.")
-                    break
-
-                name = Path(ifc_path).name
-                self.ui_call(self.set_status, f"[{j}/{total}] Дисциплина: {name}")
-                model = open_ifc(ifc_path)
-
-                ifc_p = Path(ifc_path)
-                root_dir = self.get_reports_root_dir(ifc_path)
-                disc_dir = root_dir / SUB_DISC
-                disc_dir.mkdir(parents=True, exist_ok=True)
-
-                item = items_map.get(ifc_path)
-                if item is None:
-                    item = {
-                        "model": name,
-                        "site_name": None,
-                        "x": None,
-                        "y": None,
-                        "z": None,
-                        "lat": None,
-                        "lon": None,
-                        "site_building_pct": None,
-                        "building_pct": None,
-                        "storey_pct": None,
-                        "qty": None,
-                        "dir_root": root_dir,
-                        "common": None,
-                        "common_pct": None,
-                        "disc": None,
-                        "disc_pct": None,
-                        "disc_code": None,
-                    }
-
-                if not item.get("site_name"):
                     item.update(get_ifc_site_data(model))
+                    item["qty"] = get_ifc_elements_count(model)
 
-                rules = [r.__dict__ for r in self.profile.disc_rules]
-                rule, _ = match_rule(name, rules, self.cfg.match_mode)
-                if rule:
-                    d_ids = (rule.get("ids_path") or "").strip()
-                    try:
-                        d_specs = open_ids(d_ids)
-                        d_specs.validate(model)
-                        out_base_disc = disc_dir / f"{ifc_p.stem}"
+                    # ---------- PASS 1: МССК ----------
+                    if common_specs:
+                        try:
+                            self.ui_call(self.set_status, f"[{i}/{total}] МССК: {name}")
+                            common_specs.validate(model)
+
+                            out_base_common = mssk_dir / ifc_p.stem
+                            html_c, pct_c = emit_reports(
+                                common_specs,
+                                out_base_common,
+                                common_ids,
+                                ifc_path
+                            )
+
+                            self.ui_call(self.log, f"✅ МССК отчёт: {html_c}")
+                            item["common"] = html_c
+                            item["common_pct"] = pct_c
+
+                            if open_after and html_c:
+                                try:
+                                    os.startfile(str(html_c))
+                                except Exception:
+                                    pass
+
+                        except Exception as e:
+                            self.ui_call(self.log, f"❌ МССК ошибка: {name}: {e}")
+                    else:
+                        self.ui_call(self.log, f"🟡 Общая IDS не задана — МССК пропущен: {name}")
+
+                    self.ui_call(self.pb.step, 1)
+
+                    # ---------- PASS 2: дисциплина ----------
+                    rule, _ = match_rule(name, rules, self.cfg.match_mode)
+
+                    if rule:
+                        d_ids = (rule.get("ids_path") or "").strip()
                         mapping_path = (rule.get("mapping_path") or "").strip()
-                        html_d, pct_d = emit_reports(
-                            d_specs,
-                            out_base_disc,
-                            d_ids,
-                            ifc_path,
-                            mapping_path=mapping_path
-                        )
-                        self.ui_call(self.log, f"✅ Дисциплина: {html_d}")
-                        item["disc"] = html_d
-                        item["disc_pct"] = pct_d
-                        item["disc_code"] = ""
-                        item["site_building_pct"] = _ifc_class_percent_from_html(html_d, "IfcSite")
-                        item["building_pct"] = _ifc_class_percent_from_html(html_d, "IfcBuilding")
-                        item["storey_pct"] = _ifc_class_percent_from_html(html_d, "IfcBuildingStorey")
-                        if self.open_after.get() and html_d:
-                            try:
-                                os.startfile(str(html_d))
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        self.ui_call(self.log, f"❌ Ошибка дисциплины: {e}")
-                else:
-                    self.ui_call(self.log, "🟡 Правило дисциплины не найдено (пропуск).")
 
-                items_map[ifc_path] = item
-                self.ui_call(self.pb.step, 1)
+                        try:
+                            self.ui_call(self.set_status, f"[{i}/{total}] Дисциплина: {name}")
 
-            items = list(items_map.values())
+                            if d_ids not in discipline_specs_cache:
+                                discipline_specs_cache[d_ids] = open_ids(d_ids)
+
+                            d_specs = discipline_specs_cache[d_ids]
+                            d_specs.validate(model)
+
+                            out_base_disc = disc_dir / ifc_p.stem
+                            html_d, pct_d = emit_reports(
+                                d_specs,
+                                out_base_disc,
+                                d_ids,
+                                ifc_path,
+                                mapping_path=mapping_path
+                            )
+
+                            self.ui_call(self.log, f"✅ Дисциплина: {html_d}")
+
+                            item["disc"] = html_d
+                            item["disc_pct"] = pct_d
+                            item["disc_code"] = ""
+                            item["site_building_pct"] = _ifc_class_percent_from_html(html_d, "IfcSite")
+                            item["building_pct"] = _ifc_class_percent_from_html(html_d, "IfcBuilding")
+                            item["storey_pct"] = _ifc_class_percent_from_html(html_d, "IfcBuildingStorey")
+
+                            if open_after and html_d:
+                                try:
+                                    os.startfile(str(html_d))
+                                except Exception:
+                                    pass
+
+                        except Exception as e:
+                            self.ui_call(self.log, f"❌ Ошибка дисциплины: {name}: {e}")
+                    else:
+                        self.ui_call(self.log, f"🟡 Правило дисциплины не найдено: {name}")
+
+                    self.ui_call(self.pb.step, 1)
+
+                except Exception as e:
+                    self.ui_call(self.log, f"❌ Ошибка обработки IFC: {name}: {e}")
+                    self.ui_call(self.pb.step, 2)
+
+                items.append(item)
+
             if make_summary and items:
                 try:
                     root_dir = items[0]["dir_root"]
                     s_path = summary_path(root_dir)
+
                     write_summary(
                         s_path,
                         items,
                         project_name=self.profile.name,
                         section_descriptions=self.profile.section_descriptions
                     )
+
                     self.ui_call(self.log, f"🆗 Сводный отчёт: {s_path}")
+
                     try:
                         os.startfile(str(s_path))
                     except Exception:
                         pass
+
                 except Exception as e:
                     self.ui_call(self.log, f"! Не удалось создать сводный отчёт: {e}")
 
             self.ui_call(self.set_status, "Завершено.")
+
         except Exception as e:
             tb = traceback.format_exc(limit=8)
             self.ui_call(self.log, "Критическая ошибка:\n" + tb)
             self.ui_call(self.set_status, f"Ошибка: {e}")
+
         finally:
             self.is_running = False
             self.ui_call(self.btn_run.config, state="normal")
