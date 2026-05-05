@@ -22,19 +22,20 @@ PATTERN_DESCRIPTIONS = {
     r"(НН|ПН|ЛО)": "Введите одно из значений: НН, ПН, ЛО",
     r"^(I|II|III|IV|VIII|IIa|IIIa|IVa)$": "Введите одно из значений: I, II, III, IV, VIII, IIa, IIIa, IVa",
     r"А\d{3}.*": "Введите значение, начинающееся с А и трех цифр, например: А500",
-    r"ВН НН .*": "Введите значение, начинающееся с ВН НН, например: ВН НН жилое здание",
+    r"ВН НН .*": "Введите значение, начинающееся с ВН НН",
     r"воздух|аргон|криптон": "Введите одно из значений: воздух, аргон, криптон",
     r"Е|П": "Введите одно из значений: Е, П",
-    r"НД .*": "Введите значение, начинающееся с НД, например: НД 01",
+    r"НД .*": "Введите значение, начинающееся с НД",
     r"НД .*|ПЗ .*": "Введите значение, начинающееся с НД или ПЗ",
-    r"ПЗ .*": "Введите значение, начинающееся с ПЗ, например: ПЗ 01",
-    r"СТ .*": "Введите код, начинающийся с СТ, например: СТ 00 10",
-    r"Ф.*": "Введите значение, начинающееся с Ф, например: Ф100",
-    r"ЭЛ .*": "Введите код, начинающийся с ЭЛ, например: ЭЛ 30 10 40",
-    r"B.*": "Введите значение, начинающееся с B, например: B25",
-    r"F.*": "Введите значение, начинающееся с F, например: F100",
-    r"W\d{1,2}": "Введите значение W и 1–2 цифры, например: W6 или W12",
+    r"ПЗ .*": "Введите значение, начинающееся с ПЗ",
+    r"СТ .*": "Введите код, начинающийся с СТ",
+    r"Ф.*": "Введите значение, начинающееся с Ф",
+    r"ЭЛ .*": "Введите код, начинающийся с ЭЛ",
+    r"B.*": "Введите значение, начинающееся с B",
+    r"F.*": "Введите значение, начинающееся с F",
+    r"W\d{1,2}": "Введите значение W и 1–2 цифры",
 }
+
 
 def read_text_auto(path: Path) -> str:
     raw = path.read_bytes()
@@ -57,8 +58,10 @@ def load_mge_mapping(path: str | Path) -> dict[str, str]:
 
         if not line.strip():
             continue
+
         if line.lstrip().startswith("#"):
             continue
+
         if line.lstrip().startswith("PropertySet:"):
             continue
 
@@ -90,23 +93,52 @@ def get_mge_mapping(mapping_path: str | Path | None) -> dict[str, str]:
 
     return _MGE_MAPPING_CACHE[key]
 
-def replace_pattern_block(value: str) -> str:
+
+def replace_value_block(value: str) -> str:
     """
-    Преобразует {'pattern': '...'} в человекочитаемый текст
+    Преобразует:
+    {'pattern': '...'}
+    {'minLength': 2}
+    {'enumeration': [...]}
+    в человекочитаемый текст.
     """
-    match = re.search(r"\{\s*'pattern'\s*:\s*'(.+?)'\s*\}", value)
 
-    if not match:
-        return value
+    # {'pattern': '...'}
+    m = re.search(
+        r"\{\s*'pattern'\s*:\s*'(.+?)'\s*\}",
+        value,
+        flags=re.DOTALL,
+    )
+    if m:
+        pattern = m.group(1)
+        description = PATTERN_DESCRIPTIONS.get(pattern)
+        return f"Шаблон: {description or pattern}"
 
-    pattern = match.group(1)
+    # {'minLength': 2}
+    m = re.search(
+        r"\{\s*'minLength'\s*:\s*(\d+)\s*\}",
+        value,
+        flags=re.DOTALL,
+    )
+    if m:
+        return f"Минимальная длина - {m.group(1)}"
 
-    description = PATTERN_DESCRIPTIONS.get(pattern)
+    # {'enumeration': ['...', '...']}
+    m = re.search(
+        r"\{\s*'enumeration'\s*:\s*\[(.*?)\]\s*\}",
+        value,
+        flags=re.DOTALL,
+    )
+    if m:
+        values = re.findall(r"'([^']+)'", m.group(1))
 
-    if description:
-        return f"Шаблон: {description}"
-    else:
-        return f"Шаблон: {pattern}"
+        if values:
+            return "Список: " + ", ".join(values)
+
+        return "Список"
+
+    return value
+
 
 def translate_summary_text(text: str, mapping: dict[str, str]) -> str:
     text = " ".join(text.split())
@@ -124,23 +156,18 @@ def translate_summary_text(text: str, mapping: dict[str, str]) -> str:
     match = re.match(
         r"^(?P<param>.+?)\s+data shall be\s+(?P<value>\{.*?\}|provided)\s+and in the dataset\s+(?P<dataset>\S+)$",
         text,
-        flags=re.IGNORECASE,
+        flags=re.IGNORECASE | re.DOTALL,
     )
 
     if match:
         param = match.group("param")
         value = match.group("value")
-
-        # 🔥 обработка pattern
-        if "pattern" in value:
-            value = replace_pattern_block(value)
-        elif value == "provided":
-            value = "заполнено"
-            
         dataset = match.group("dataset")
 
         if value == "provided":
             value = "заполнено"
+        else:
+            value = replace_value_block(value)
 
         return (
             f"Параметр {param} должен соответствовать значению {value} "
@@ -159,6 +186,8 @@ def translate_summary_text(text: str, mapping: dict[str, str]) -> str:
 
     for pattern, replacement in replacements:
         result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
+
+    result = replace_value_block(result)
 
     return f"Параметр {result}".strip()
 
