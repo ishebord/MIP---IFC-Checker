@@ -175,6 +175,12 @@ def write_summary(
         lat = it.get("lat") or "—"
         lon = it.get("lon") or "—"
 
+        storey_names = it.get("storey_names") or []
+        if isinstance(storey_names, list) and storey_names:
+            storey_names_html = "<br>".join(str(x) for x in storey_names)
+        else:
+            storey_names_html = "—"
+
         c_href = _rel(base, common_html)
         d_href = _rel(base, disc_html)
 
@@ -198,6 +204,7 @@ def write_summary(
             f"{_pct_badge(site_building_pct, 'group-ifc')}"
             f"{_pct_badge(building_pct, 'group-ifc')}"
             f"{_pct_badge(storey_pct, 'group-ifc')}"
+            f"<td class='group-storeys'>{storey_names_html}</td>"
             f"</tr>"
         )
 
@@ -374,6 +381,7 @@ tr:hover td {{
     <label><input type="checkbox" data-group="coords"> Координаты (X/Y/Z)</label>
     <label><input type="checkbox" data-group="geo"> География (Lat/Lon)</label>
     <label><input type="checkbox" checked data-group="ifc"> IFC структура</label>
+    <label><input type="checkbox" data-group="storeys"> Уровни</label>
 </div>
 
 <div class="table-wrap">
@@ -394,6 +402,7 @@ tr:hover td {{
 <th class="group-ifc">IfcSite – Участок застройки</th>
 <th class="group-ifc">IfcBuilding - Здание (сооружение)</th>
 <th class="group-ifc">IfcBuildingStorey - Этаж (уровень)</th>
+<th class="group-storeys">Список уровней</th>
 </tr>
 </thead>
 

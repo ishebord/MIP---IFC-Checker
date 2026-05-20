@@ -113,6 +113,34 @@ def get_ifc_elements_count(model) -> str:
         return str(len(model.by_type("IfcElement")))
     except Exception:
         return "—"
+    
+def get_ifc_storey_names(model) -> list[str]:
+    result = []
+
+    try:
+        storeys = model.by_type("IfcBuildingStorey")
+    except Exception:
+        return result
+
+    for storey in storeys:
+        try:
+            name = getattr(storey, "Name", None)
+            long_name = getattr(storey, "LongName", None)
+
+            name = str(name).strip() if name else ""
+            long_name = str(long_name).strip() if long_name else ""
+
+            if name and long_name and name != long_name:
+                result.append(f"{name} / {long_name}")
+            elif name:
+                result.append(name)
+            elif long_name:
+                result.append(long_name)
+
+        except Exception:
+            pass
+
+    return result
 
 def get_ifc_site_data(model) -> Dict[str, Optional[str]]:
     """

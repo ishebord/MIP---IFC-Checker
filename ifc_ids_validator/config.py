@@ -122,6 +122,7 @@ class Profile:
     common_ids_path: str = ""
     disc_rules: List[DisciplineRule] = field(default_factory=list)
     create_summary: bool = True
+    remove_empty_ifc_classes: bool = False
     rules_mode: str = "Приказ 64"
     section_descriptions: List[List[str]] = field(default_factory=list)    
 
@@ -135,6 +136,7 @@ class Profile:
             common_ids_path="",
             disc_rules=[],
             create_summary=bool(d.get("create_summary", True)),
+            remove_empty_ifc_classes=bool(d.get("remove_empty_ifc_classes", False)),
             rules_mode=d.get("rules_mode", "Приказ 64"),
             section_descriptions=[],
         )
@@ -145,6 +147,7 @@ class Profile:
             "ifc_paths": list(self.ifc_paths),
             "reports_dir": self.reports_dir,
             "create_summary": bool(self.create_summary),
+            "remove_empty_ifc_classes": bool(self.remove_empty_ifc_classes),
             "rules_mode": self.rules_mode,
         }
 

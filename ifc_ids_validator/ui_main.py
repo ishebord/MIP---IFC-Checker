@@ -19,7 +19,7 @@ from ifc_ids_validator.config import (
 from ifc_ids_validator.validator import (
     MATCH_CONTAINS,
     match_rule, open_ids, open_ifc, emit_reports, get_ifc_site_data,
-    get_ifc_elements_count,
+    get_ifc_elements_count, get_ifc_storey_names,
     _ifc_class_percent_from_html
 )
 from ifc_ids_validator.summary import write_summary, summary_path
@@ -1335,12 +1335,14 @@ class App(tk.Tk):
         self.current_rules_mode = self.profile.rules_mode
         self.rules_mode_var.set(self.current_rules_mode)
         self.create_summary.set(bool(self.profile.create_summary))
+        self.remove_empty_ifc_classes.set(bool(self.profile.remove_empty_ifc_classes))
         self.reports_dir_var.set(self.profile.reports_dir or "")
         self.ifc_paths = list(self.profile.ifc_paths)
         self._refresh_ifc_list()
 
     def _collect_ui_to_profile(self):
         self.profile.create_summary = bool(self.create_summary.get())
+        self.profile.remove_empty_ifc_classes = bool(self.remove_empty_ifc_classes.get())
         self.profile.ifc_paths = list(self.ifc_paths)
         self.profile.reports_dir = self.reports_dir_var.get().strip()
         self.profile.rules_mode = self.rules_mode_var.get()
@@ -1736,6 +1738,7 @@ class App(tk.Tk):
                     "disc": None,
                     "disc_pct": None,
                     "disc_code": None,
+                    "storey_names": [],
                 }
 
                 try:
@@ -1744,6 +1747,7 @@ class App(tk.Tk):
 
                     item.update(get_ifc_site_data(model))
                     item["qty"] = get_ifc_elements_count(model)
+                    item["storey_names"] = get_ifc_storey_names(model)
 
                     # ---------- PASS 1: МССК ----------
                     if common_specs:
