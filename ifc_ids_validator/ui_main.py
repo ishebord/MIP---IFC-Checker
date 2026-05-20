@@ -1209,34 +1209,8 @@ class App(tk.Tk):
 
         sb_log = ttk.Scrollbar(text_wrap, orient="vertical", command=self.txt_log.yview)
         sb_log.grid(row=0, column=1, sticky="ns")
-        self.txt_log.config(yscrollcommand=sb_log.set)       
-
-        frm_log.grid_columnconfigure(0, weight=1)
-        frm_log.grid_rowconfigure(0, weight=1)
-
-        text_wrap = tk.Frame(frm_log, bg=COLOR_SURFACE)
-        text_wrap.grid(row=0, column=0, sticky="nsew")
-        text_wrap.grid_columnconfigure(0, weight=1)
-        text_wrap.grid_rowconfigure(0, weight=1)
-
-        self.txt_log = tk.Text(
-            text_wrap,
-            height=13,
-            font=("Consolas", 10),
-            bg="white",
-            fg=COLOR_TEXT,
-            relief="flat",
-            wrap="word",
-            highlightthickness=1,
-            highlightbackground=COLOR_BORDER,
-            insertbackground=COLOR_TEXT
-        )
-        self.txt_log.grid(row=0, column=0, sticky="nsew")
-
-        sb_log = ttk.Scrollbar(text_wrap, orient="vertical", command=self.txt_log.yview)
-        sb_log.grid(row=0, column=1, sticky="ns")
         self.txt_log.config(yscrollcommand=sb_log.set)
-
+        
         # Bottom buttons
         bottom = tk.Frame(main, bg=COLOR_BG)
         bottom.grid(row=2, column=0, sticky="ew", pady=(12, 0))
@@ -1633,18 +1607,24 @@ class App(tk.Tk):
             if self.game_process and self.game_process.poll() is None:
                 return
 
-            game_path = Path(__file__).parent / "game.py"
+            if getattr(sys, "frozen", False):
+                cmd = [sys.executable, "--game"]
+            else:
+                game_path = Path(__file__).resolve().parent / "game.py"
 
-            if not game_path.exists():
-                self.log(f"⚠️ Игра не найдена: {game_path}")
-                return
+                if not game_path.exists():
+                    self.log(f"⚠️ Игра не найдена: {game_path}")
+                    return
+
+                cmd = [sys.executable, str(game_path)]
 
             creationflags = 0
+
             if os.name == "nt":
                 creationflags = subprocess.CREATE_NO_WINDOW
 
             self.game_process = subprocess.Popen(
-                [sys.executable, str(game_path)],
+                cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 creationflags=creationflags

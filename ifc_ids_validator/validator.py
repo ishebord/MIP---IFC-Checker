@@ -346,12 +346,16 @@ def _ifc_class_percent_from_html(html_path: Path, ifc_class: str) -> Optional[st
 
 # ---------------------------- CLI helper ----------------------------
 def _run_ifctester_cli(ids_path: str, ifc_path: str, report: str, out_dir: Path) -> None:
-    """
-    Запуск ifctester через CLI без -o, с cwd=out_dir (устраняет проблемы путей/кириллицы).
-    Создаёт {stem}.html/.json в out_dir.
-    """
+    if getattr(sys, "frozen", False):
+        raise RuntimeError(
+            "CLI-запуск ifctester отключён в exe-сборке. "
+            "Используется только встроенный reporter ifctester."
+        )
+
     out_dir.mkdir(parents=True, exist_ok=True)
+
     args = [sys.executable, "-m", "ifctester", ids_path, ifc_path, "-r", report]
+
     completed = subprocess.run(
         args,
         cwd=str(out_dir),
@@ -360,8 +364,11 @@ def _run_ifctester_cli(ids_path: str, ifc_path: str, report: str, out_dir: Path)
         text=True,
         encoding="utf-8"
     )
+
     if completed.returncode != 0:
-        raise RuntimeError(f"ifctester {report} failed (code {completed.returncode}).\n{completed.stdout}")
+        raise RuntimeError(
+            f"ifctester {report} failed (code {completed.returncode}).\n{completed.stdout}"
+        )
 
 
 # ----------------------------- reports ------------------------------
