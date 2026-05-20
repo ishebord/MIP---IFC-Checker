@@ -768,6 +768,7 @@ class App(tk.Tk):
         self.reports_dir_var = tk.StringVar(value="")
         self.open_after = tk.BooleanVar(value=False)
         self.create_summary = tk.BooleanVar(value=True)
+        self.remove_empty_ifc_classes = tk.BooleanVar(value=False)
         self.is_running = False
         self.ui_queue = queue.Queue()
 
@@ -1149,6 +1150,13 @@ class App(tk.Tk):
             frm_opts,
             text="Создать сводный HTML",
             variable=self.create_summary,
+            style="Corp.TCheckbutton"
+        ).pack(side="left", padx=(18, 0))
+
+        ttk.Checkbutton(
+            frm_opts,
+            text="Удалить пустые Ifc классы",
+            variable=self.remove_empty_ifc_classes,
             style="Corp.TCheckbutton"
         ).pack(side="left", padx=(18, 0))
 
@@ -1676,6 +1684,7 @@ class App(tk.Tk):
         total = len(self.ifc_paths)
         open_after = self.open_after.get()
         make_summary = bool(self.create_summary.get())
+        remove_empty_ifc_classes = bool(self.remove_empty_ifc_classes.get())
         common_ids = self.profile.common_ids_path
 
         items = []
@@ -1747,7 +1756,8 @@ class App(tk.Tk):
                                 common_specs,
                                 out_base_common,
                                 common_ids,
-                                ifc_path
+                                ifc_path,
+                                remove_empty_ifc_classes=remove_empty_ifc_classes
                             )
 
                             self.ui_call(self.log, f"✅ МССК отчёт: {html_c}")
@@ -1789,7 +1799,8 @@ class App(tk.Tk):
                                 out_base_disc,
                                 d_ids,
                                 ifc_path,
-                                mapping_path=mapping_path
+                                mapping_path=mapping_path,
+                                remove_empty_ifc_classes=remove_empty_ifc_classes
                             )
 
                             self.ui_call(self.log, f"✅ Дисциплина: {html_d}")

@@ -378,6 +378,7 @@ def emit_reports(
     ids_path: str,
     ifc_path: str,
     mapping_path: str | None = None,
+    remove_empty_ifc_classes: bool = False,
 ) -> Tuple[Path, Optional[float]]:
     """
     Генерирует HTML-отчёт для переданных specs.
@@ -428,6 +429,7 @@ def emit_reports(
             postprocess_html_report(
                 target_html,
                 mapping_path=mapping_path,
+                remove_empty_ifc_classes=remove_empty_ifc_classes
             )
         except Exception as e:
             print(f"[POSTPROCESS ERROR] {target_html}: {e}")

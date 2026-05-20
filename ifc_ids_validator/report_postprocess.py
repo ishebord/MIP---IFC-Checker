@@ -196,6 +196,7 @@ def postprocess_html_report(
     html_path: str | Path,
     output_path: str | Path | None = None,
     mapping_path: str | Path | None = None,
+    remove_empty_ifc_classes: bool = False,
 ) -> Path:
     html_path = Path(html_path)
     output_path = Path(output_path) if output_path else html_path
@@ -204,6 +205,10 @@ def postprocess_html_report(
 
     html = html_path.read_text(encoding="utf-8", errors="ignore")
     soup = BeautifulSoup(html, "html.parser")
+    
+    if remove_empty_ifc_classes:
+        for section in soup.find_all("section", class_=lambda c: c and "specification" in c and "is-skipped" in c):
+            section.decompose()
 
     for summary in soup.find_all("summary"):
         old_text = summary.get_text(" ", strip=True)
