@@ -14,6 +14,10 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 
 
+# ============================================================
+# ОБЩИЕ НАСТРОЙКИ
+# ============================================================
+
 WIDTH, HEIGHT = 960, 560
 FPS = 120
 
@@ -132,7 +136,8 @@ def save_score_to_excel(user, score):
 
     data.sort(key=lambda x: x[1], reverse=True)
 
-    ws.delete_rows(2, ws.max_row)
+    if ws.max_row >= 2:
+        ws.delete_rows(2, ws.max_row)
 
     for i, (name, value) in enumerate(data, start=2):
         ws.cell(row=i, column=1).value = name
@@ -165,6 +170,10 @@ def save_score_to_excel(user, score):
     wb.save(RESULT_FILE)
 
 
+# ============================================================
+# ЧАСТИЦЫ
+# ============================================================
+
 @dataclass
 class Particle:
     x: float
@@ -176,9 +185,11 @@ class Particle:
     life: float
     max_life: float
     glow: bool = True
+    gravity: float = 0.0
 
     def update(self, dt):
         self.life -= dt
+        self.vy += self.gravity * dt
         self.x += self.vx * dt
         self.y += self.vy * dt
         self.vx *= 0.985
@@ -193,6 +204,10 @@ class Particle:
             pygame.draw.circle(surf, tuple(int(c * 0.35) for c in color), (int(self.x), int(self.y)), r * 4)
         pygame.draw.circle(surf, color, (int(self.x), int(self.y)), r)
 
+
+# ============================================================
+# NEON CORE
+# ============================================================
 
 class Player:
     def __init__(self):
@@ -421,10 +436,524 @@ class Orb:
         pygame.draw.circle(surf, WHITE, (int(self.x - 2), int(self.y - 2)), 2)
 
 
+# ============================================================
+# TETRIS
+# ============================================================
+
+TETRIS_COLS = 10
+TETRIS_ROWS = 20
+TETRIS_CELL = 24
+TETRIS_X = 258
+TETRIS_Y = 42
+
+TETRIS_SHAPES = {
+    "I": [[1, 1, 1, 1]],
+    "O": [[1, 1], [1, 1]],
+    "T": [[0, 1, 0], [1, 1, 1]],
+    "S": [[0, 1, 1], [1, 1, 0]],
+    "Z": [[1, 1, 0], [0, 1, 1]],
+    "J": [[1, 0, 0], [1, 1, 1]],
+    "L": [[0, 0, 1], [1, 1, 1]],
+}
+
+TETRIS_COLORS = {
+    "I": (53, 220, 255),
+    "O": (255, 230, 90),
+    "T": (165, 90, 255),
+    "S": (70, 245, 160),
+    "Z": (255, 70, 85),
+    "J": (60, 120, 255),
+    "L": (255, 165, 70),
+}
+
+
+class TetrisPiece:
+    def __init__(self, kind=None):
+        self.kind = kind or random.choice(list(TETRIS_SHAPES.keys()))
+        self.matrix = [row[:] for row in TETRIS_SHAPES[self.kind]]
+        self.x = TETRIS_COLS // 2 - len(self.matrix[0]) // 2
+        self.y = -1
+        self.color = TETRIS_COLORS[self.kind]
+
+    def rotated(self):
+        rows = len(self.matrix)
+        cols = len(self.matrix[0])
+        return [[self.matrix[rows - 1 - r][c] for r in range(rows)] for c in range(cols)]
+
+
+class TetrisGame:
+    def __init__(self, outer: "Game"):
+        self.outer = outer
+        self.font_big = outer.font_big
+        self.font_mid = outer.font_mid
+        self.font = outer.font
+        self.font_small = outer.font_small
+        self.reset()
+
+    def reset(self):
+        self.board = [[None for _ in range(TETRIS_COLS)] for _ in range(TETRIS_ROWS)]
+        self.bag = []
+        self.current = self.next_piece()
+        self.next_items = [self.next_piece() for _ in range(3)]
+        self.hold = None
+        self.can_hold = True
+
+        self.score = 0
+        self.lines = 0
+        self.level = 1
+        self.combo = 0
+        self.drop_timer = 0
+        self.lock_timer = 0
+        self.soft_drop = False
+        self.game_over = False
+        self.pause = False
+
+        # Мягкое управление по горизонтали (DAS/ARR как в хороших тетрисах):
+        # первое нажатие двигает на 1 клетку, затем есть небольшая пауза,
+        # и только потом начинается спокойный автоповтор.
+        self.move_cooldown = 0
+        self.move_direction = 0
+        self.move_das = 0.0
+        self.move_arr = 0.0
+        self.move_initial_delay = 0.18   # задержка перед автоповтором
+        self.move_repeat_delay = 0.085   # частота автоповтора
+
+        # Отдельные координаты только для отрисовки — фигура визуально
+        # плавно догоняет логическую позицию, а не дёргается мгновенно.
+        self.visual_x = float(self.current.x)
+        self.visual_y = float(self.current.y)
+
+        self.rotate_cooldown = 0
+        self.hard_drop_flash = 0
+        self.line_flash = []
+        self.particles: list[Particle] = []
+        self.message = ""
+        self.message_timer = 0
+        self.t = 0
+
+    def next_piece(self):
+        if not self.bag:
+            self.bag = list(TETRIS_SHAPES.keys())
+            random.shuffle(self.bag)
+        return TetrisPiece(self.bag.pop())
+
+    def spawn_next(self):
+        self.current = self.next_items.pop(0)
+        self.next_items.append(self.next_piece())
+        self.current.x = TETRIS_COLS // 2 - len(self.current.matrix[0]) // 2
+        self.current.y = -1
+        self.visual_x = float(self.current.x)
+        self.visual_y = float(self.current.y)
+        self.can_hold = True
+        if not self.valid(self.current.x, self.current.y, self.current.matrix):
+            self.game_over = True
+            self.message = "СТЕК ПЕРЕПОЛНЕН"
+            self.message_timer = 999
+
+    def valid(self, x, y, matrix):
+        for r, row in enumerate(matrix):
+            for c, val in enumerate(row):
+                if not val:
+                    continue
+                bx = x + c
+                by = y + r
+                if bx < 0 or bx >= TETRIS_COLS or by >= TETRIS_ROWS:
+                    return False
+                if by >= 0 and self.board[by][bx] is not None:
+                    return False
+        return True
+
+    def move(self, dx, dy):
+        if self.valid(self.current.x + dx, self.current.y + dy, self.current.matrix):
+            self.current.x += dx
+            self.current.y += dy
+            return True
+        return False
+
+    def rotate(self, direction=1):
+        mat = self.current.rotated()
+        if direction < 0:
+            # Три поворота по часовой = один против часовой.
+            for _ in range(2):
+                rows = len(mat)
+                cols = len(mat[0])
+                mat = [[mat[rows - 1 - r][c] for r in range(rows)] for c in range(cols)]
+
+        for kick in [0, -1, 1, -2, 2]:
+            if self.valid(self.current.x + kick, self.current.y, mat):
+                self.current.x += kick
+                self.current.matrix = mat
+                self.spawn_piece_spark()
+                return True
+        return False
+
+    def hold_piece(self):
+        if not self.can_hold:
+            return
+        old = self.current
+        if self.hold is None:
+            self.hold = TetrisPiece(old.kind)
+            self.spawn_next()
+        else:
+            self.current = TetrisPiece(self.hold.kind)
+            self.hold = TetrisPiece(old.kind)
+            self.visual_x = float(self.current.x)
+            self.visual_y = float(self.current.y)
+        self.can_hold = False
+        self.spawn_piece_spark()
+
+    def hard_drop(self):
+        dist = 0
+        while self.move(0, 1):
+            dist += 1
+        self.score += dist * 2
+        self.visual_x = float(self.current.x)
+        self.visual_y = float(self.current.y)
+        self.hard_drop_flash = 0.16
+        self.lock_piece()
+
+    def ghost_y(self):
+        gy = self.current.y
+        while self.valid(self.current.x, gy + 1, self.current.matrix):
+            gy += 1
+        return gy
+
+    def lock_piece(self):
+        for r, row in enumerate(self.current.matrix):
+            for c, val in enumerate(row):
+                if not val:
+                    continue
+                bx = self.current.x + c
+                by = self.current.y + r
+                if by < 0:
+                    self.game_over = True
+                    return
+                self.board[by][bx] = self.current.kind
+                self.spawn_block_particles(bx, by, self.current.color, count=4)
+
+        self.clear_lines()
+        self.spawn_next()
+
+    def clear_lines(self):
+        full = [i for i, row in enumerate(self.board) if all(cell is not None for cell in row)]
+        if not full:
+            self.combo = 0
+            return
+
+        self.line_flash = [(row, 0.28) for row in full]
+
+        for row_i in full:
+            for col in range(TETRIS_COLS):
+                kind = self.board[row_i][col]
+                color = TETRIS_COLORS.get(kind, WHITE)
+                self.spawn_block_particles(col, row_i, color, count=9)
+
+        new_board = [row for i, row in enumerate(self.board) if i not in full]
+        while len(new_board) < TETRIS_ROWS:
+            new_board.insert(0, [None for _ in range(TETRIS_COLS)])
+        self.board = new_board
+
+        n = len(full)
+        self.lines += n
+        self.level = 1 + self.lines // 10
+        self.combo += 1
+
+        points = {1: 100, 2: 300, 3: 500, 4: 900}.get(n, 1200)
+        self.score += points * self.level + self.combo * 45
+
+        if n == 4:
+            self.message = "TETRIS!"
+            self.message_timer = 1.2
+        elif self.combo > 2:
+            self.message = f"COMBO x{self.combo}"
+            self.message_timer = 0.9
+        else:
+            self.message = f"+{points * self.level}"
+            self.message_timer = 0.7
+
+    def spawn_piece_spark(self):
+        color = self.current.color
+        cx = TETRIS_X + (self.current.x + 1.5) * TETRIS_CELL
+        cy = TETRIS_Y + (self.current.y + 1.5) * TETRIS_CELL
+        for _ in range(8):
+            a = random.uniform(0, math.tau)
+            s = random.uniform(35, 130)
+            self.particles.append(Particle(
+                cx, cy, math.cos(a) * s, math.sin(a) * s,
+                random.uniform(1.5, 3.5), color, 0.25, 0.25
+            ))
+
+    def spawn_block_particles(self, col, row, color, count=5):
+        x = TETRIS_X + col * TETRIS_CELL + TETRIS_CELL / 2
+        y = TETRIS_Y + row * TETRIS_CELL + TETRIS_CELL / 2
+        for _ in range(count):
+            a = random.uniform(0, math.tau)
+            s = random.uniform(35, 190)
+            self.particles.append(Particle(
+                x, y, math.cos(a) * s, math.sin(a) * s,
+                random.uniform(1.5, 4.2), color,
+                random.uniform(0.25, 0.65), 0.65, gravity=160
+            ))
+
+    def fall_delay(self):
+        return max(0.065, 0.72 * (0.86 ** (self.level - 1)))
+
+    def handle_event(self, event):
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                self.outer.state = "select"
+                return
+
+            if self.game_over:
+                if event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                    self.reset()
+                return
+
+            if event.key == pygame.K_p:
+                self.pause = not self.pause
+            if self.pause:
+                return
+
+            if event.key in (pygame.K_LEFT, pygame.K_a):
+                self.move_direction = -1
+                self.move_das = self.move_initial_delay
+                self.move_arr = 0.0
+                self.move(-1, 0)
+            elif event.key in (pygame.K_RIGHT, pygame.K_d):
+                self.move_direction = 1
+                self.move_das = self.move_initial_delay
+                self.move_arr = 0.0
+                self.move(1, 0)
+            elif event.key in (pygame.K_DOWN, pygame.K_s):
+                self.soft_drop = True
+            elif event.key in (pygame.K_UP, pygame.K_w, pygame.K_x):
+                self.rotate(1)
+            elif event.key in (pygame.K_z,):
+                self.rotate(-1)
+            elif event.key == pygame.K_SPACE:
+                self.hard_drop()
+            elif event.key in (pygame.K_c, pygame.K_LSHIFT, pygame.K_RSHIFT):
+                self.hold_piece()
+
+        if event.type == pygame.KEYUP:
+            if event.key in (pygame.K_DOWN, pygame.K_s):
+                self.soft_drop = False
+            elif event.key in (pygame.K_LEFT, pygame.K_a) and self.move_direction == -1:
+                self.move_direction = 0
+                self.move_das = 0.0
+                self.move_arr = 0.0
+            elif event.key in (pygame.K_RIGHT, pygame.K_d) and self.move_direction == 1:
+                self.move_direction = 0
+                self.move_das = 0.0
+                self.move_arr = 0.0
+
+    def update(self, dt):
+        self.t += dt
+        self.message_timer = max(0, self.message_timer - dt)
+        self.hard_drop_flash = max(0, self.hard_drop_flash - dt)
+        self.move_cooldown = max(0, self.move_cooldown - dt)
+        self.rotate_cooldown = max(0, self.rotate_cooldown - dt)
+
+        for p in list(self.particles):
+            if not p.update(dt):
+                self.particles.remove(p)
+
+        self.line_flash = [(row, t - dt) for row, t in self.line_flash if t - dt > 0]
+
+        if self.game_over or self.pause:
+            return
+
+        keys = pygame.key.get_pressed()
+
+        # Мягкий автоповтор по горизонтали.
+        # Нажатие = 1 шаг. Удержание = пауза DAS, затем редкие повторные шаги ARR.
+        if self.move_direction:
+            still_holding_left = keys[pygame.K_LEFT] or keys[pygame.K_a]
+            still_holding_right = keys[pygame.K_RIGHT] or keys[pygame.K_d]
+            if (self.move_direction == -1 and not still_holding_left) or (self.move_direction == 1 and not still_holding_right):
+                self.move_direction = 0
+                self.move_das = 0.0
+                self.move_arr = 0.0
+            else:
+                if self.move_das > 0:
+                    self.move_das = max(0.0, self.move_das - dt)
+                else:
+                    self.move_arr -= dt
+                    if self.move_arr <= 0:
+                        if self.move(self.move_direction, 0):
+                            self.move_arr = self.move_repeat_delay
+                        else:
+                            self.move_arr = self.move_repeat_delay * 1.5
+
+        # Визуальное сглаживание: логика остаётся по клеткам, но отрисовка плавно догоняет.
+        self.visual_x = lerp(self.visual_x, float(self.current.x), min(1.0, dt * 18))
+        self.visual_y = lerp(self.visual_y, float(self.current.y), min(1.0, dt * 22))
+
+        delay = 0.035 if self.soft_drop else self.fall_delay()
+        self.drop_timer += dt
+
+        while self.drop_timer >= delay:
+            self.drop_timer -= delay
+            if not self.move(0, 1):
+                self.lock_timer += delay
+                if self.lock_timer > 0.22:
+                    self.lock_timer = 0
+                    self.lock_piece()
+                break
+            else:
+                self.lock_timer = 0
+                if self.soft_drop:
+                    self.score += 1
+
+    def draw_block(self, surf, x, y, color, size=TETRIS_CELL, alpha=255, ghost=False):
+        block = pygame.Surface((size, size), pygame.SRCALPHA)
+        c = (*color, alpha)
+        dark = tuple(max(0, int(v * 0.45)) for v in color)
+        light = tuple(min(255, int(v * 1.25)) for v in color)
+
+        pygame.draw.rect(block, c, (1, 1, size - 2, size - 2), border_radius=6)
+        pygame.draw.rect(block, (*light, alpha), (4, 4, size - 8, max(3, size // 5)), border_radius=4)
+        pygame.draw.rect(block, (*dark, alpha), (1, 1, size - 2, size - 2), 2, border_radius=6)
+
+        if ghost:
+            block.set_alpha(75)
+
+        surf.blit(block, (x, y))
+
+    def draw_piece_preview(self, surf, piece, ox, oy, title):
+        draw_text(surf, self.font_small, title, ox, oy, MUTED)
+        if piece is None:
+            draw_text(surf, self.font, "—", ox + 22, oy + 38, MUTED)
+            return
+
+        mat = piece.matrix
+        size = 18
+        color = piece.color
+        px = ox + 20
+        py = oy + 28
+
+        for r, row in enumerate(mat):
+            for c, val in enumerate(row):
+                if val:
+                    self.draw_block(surf, px + c * size, py + r * size, color, size=size, alpha=220)
+
+    def draw(self, surf):
+        # Затемнённый космический фон поверх общего меню.
+        overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        overlay.fill((3, 8, 19, 120))
+        surf.blit(overlay, (0, 0))
+
+        board_rect = pygame.Rect(TETRIS_X - 10, TETRIS_Y - 10, TETRIS_COLS * TETRIS_CELL + 20, TETRIS_ROWS * TETRIS_CELL + 20)
+        pygame.draw.rect(surf, (10, 18, 38), board_rect, border_radius=18)
+        pygame.draw.rect(surf, (55, 120, 220), board_rect, 2, border_radius=18)
+
+        # Сетка
+        for r in range(TETRIS_ROWS):
+            for c in range(TETRIS_COLS):
+                x = TETRIS_X + c * TETRIS_CELL
+                y = TETRIS_Y + r * TETRIS_CELL
+                pygame.draw.rect(surf, (16, 27, 55), (x, y, TETRIS_CELL - 1, TETRIS_CELL - 1), border_radius=4)
+
+        # Заполненные клетки
+        for r in range(TETRIS_ROWS):
+            for c in range(TETRIS_COLS):
+                kind = self.board[r][c]
+                if kind:
+                    self.draw_block(surf, TETRIS_X + c * TETRIS_CELL, TETRIS_Y + r * TETRIS_CELL, TETRIS_COLORS[kind])
+
+        # Подсветка очищаемых линий
+        for row, left in self.line_flash:
+            a = int(210 * clamp(left / 0.28, 0, 1))
+            flash = pygame.Surface((TETRIS_COLS * TETRIS_CELL, TETRIS_CELL), pygame.SRCALPHA)
+            flash.fill((*WHITE, a))
+            surf.blit(flash, (TETRIS_X, TETRIS_Y + row * TETRIS_CELL))
+
+        # Призрак
+        if not self.game_over:
+            gy = self.ghost_y()
+            for r, row in enumerate(self.current.matrix):
+                for c, val in enumerate(row):
+                    if val and gy + r >= 0:
+                        self.draw_block(
+                            surf,
+                            TETRIS_X + (self.current.x + c) * TETRIS_CELL,
+                            TETRIS_Y + (gy + r) * TETRIS_CELL,
+                            self.current.color,
+                            alpha=80,
+                            ghost=True
+                        )
+
+            # Текущая фигура
+            bob = math.sin(self.t * 10) * 1.4
+            for r, row in enumerate(self.current.matrix):
+                for c, val in enumerate(row):
+                    if val and self.current.y + r >= 0:
+                        self.draw_block(
+                            surf,
+                            TETRIS_X + (self.visual_x + c) * TETRIS_CELL,
+                            TETRIS_Y + (self.visual_y + r) * TETRIS_CELL + bob,
+                            self.current.color
+                        )
+
+        # Частицы
+        for p in self.particles:
+            p.draw(surf)
+
+        # Панели
+        left_panel = pygame.Rect(36, 70, 180, 355)
+        right_panel = pygame.Rect(560, 70, 350, 355)
+        for panel in [left_panel, right_panel]:
+            pygame.draw.rect(surf, (10, 18, 38), panel, border_radius=18)
+            pygame.draw.rect(surf, (55, 120, 220), panel, 1, border_radius=18)
+
+        draw_text(surf, self.font_big, "NEON TETRIS", WIDTH // 2, 22, CYAN, center=True)
+
+        self.draw_piece_preview(surf, self.hold, 58, 96, "HOLD / C")
+        draw_text(surf, self.font_small, "Счёт", 58, 210, MUTED)
+        draw_text(surf, self.font_mid, str(self.score), 58, 232, WHITE)
+        draw_text(surf, self.font_small, "Линии", 58, 282, MUTED)
+        draw_text(surf, self.font_mid, str(self.lines), 58, 304, WHITE)
+        draw_text(surf, self.font_small, "Уровень", 58, 354, MUTED)
+        draw_text(surf, self.font_mid, str(self.level), 58, 376, YELLOW)
+
+        y = 96
+        for i, piece in enumerate(self.next_items):
+            self.draw_piece_preview(surf, piece, 590, y, "NEXT" if i == 0 else "")
+            y += 90
+
+        draw_text(surf, self.font_small, "←/→ или A/D — двигать", 590, 355, MUTED)
+        draw_text(surf, self.font_small, "↑/W/X — поворот", 590, 377, MUTED)
+        draw_text(surf, self.font_small, "Space — сбросить", 590, 399, MUTED)
+        draw_text(surf, self.font_small, "C/Shift — hold   Esc — выбор игры", 590, 421, MUTED)
+
+        if self.message_timer > 0:
+            k = clamp(self.message_timer, 0, 1)
+            draw_text(surf, self.font_big, self.message, WIDTH // 2, 500 - (1-k) * 20, YELLOW, center=True)
+
+        if self.pause:
+            self.draw_center_panel(surf, "ПАУЗА", "P — продолжить   Esc — выбор игры")
+
+        if self.game_over:
+            self.draw_center_panel(surf, "TETRIS OVER", "Enter / Space — заново   Esc — выбор игры")
+
+    def draw_center_panel(self, surf, title, subtitle):
+        panel = pygame.Rect(250, 200, 460, 145)
+        glass = pygame.Surface((panel.w, panel.h), pygame.SRCALPHA)
+        glass.fill((8, 16, 36, 230))
+        surf.blit(glass, panel)
+        pygame.draw.rect(surf, (60, 120, 255), panel, 2, border_radius=22)
+        draw_text(surf, self.font_big, title, panel.centerx, panel.y + 42, CYAN, center=True)
+        draw_text(surf, self.font, subtitle, panel.centerx, panel.y + 98, MUTED, center=True)
+
+
+# ============================================================
+# ОСНОВНОЙ КЛАСС GAME — ИМЯ НЕ МЕНЯЕМ
+# ============================================================
+
 class Game:
     def __init__(self):
         pygame.init()
-        pygame.display.set_caption("IFC CHECKER — Neon Core")
+        pygame.display.set_caption("IFC CHECKER — Game Center")
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.DOUBLEBUF)
         self.clock = pygame.time.Clock()
 
@@ -437,6 +966,11 @@ class Game:
         self.username = get_windows_user()
         self.leaderboard = load_leaderboard()
         self.score_saved = False
+
+        self.mode = None
+        self.select_index = 0
+        self.select_cards = []
+        self.tetris = TetrisGame(self)
 
         self.reset()
 
@@ -451,7 +985,7 @@ class Game:
         self.wave = 1
         self.spawn_timer = 0.5
         self.shot_timer = 0
-        self.state = "menu"
+        self.state = "select"
         self.shake = 0
         self.combo = 1
         self.combo_timer = 0
@@ -461,13 +995,43 @@ class Game:
         self.shake_duration = 1.5
 
         self.stars = []
-        for _ in range(120):
+        for _ in range(140):
             self.stars.append([
                 random.uniform(0, WIDTH),
                 random.uniform(0, HEIGHT),
                 random.uniform(0.2, 1.0),
                 random.choice([CYAN, BLUE, PURPLE, WHITE])
             ])
+
+    def start_neon(self):
+        self.reset_neon_round()
+        self.mode = "neon"
+        self.state = "neon_menu"
+
+    def reset_neon_round(self):
+        self.player = Player()
+        self.enemies = []
+        self.particles = []
+        self.orbs = []
+        self.score = 0
+        self.best = max([s for _, s in self.leaderboard], default=0)
+        self.wave = 1
+        self.spawn_timer = 0.5
+        self.shot_timer = 0
+        self.shake = 0
+        self.combo = 1
+        self.combo_timer = 0
+        self.score_saved = False
+        self.gameover_timer = 0
+        self.shake_time = 0
+        self.shake_duration = 1.5
+        if hasattr(self, "laser"):
+            del self.laser
+
+    def start_tetris(self):
+        self.mode = "tetris"
+        self.tetris.reset()
+        self.state = "tetris"
 
     def spawn_enemy(self):
         side = random.randint(0, 3)
@@ -562,6 +1126,10 @@ class Game:
 
     def update(self, dt):
         self.t += dt
+
+        if self.state == "tetris":
+            self.tetris.update(dt)
+            return
 
         if self.state == "gameover":
             self.shake_time += dt
@@ -685,6 +1253,9 @@ class Game:
         pygame.draw.circle(surf, (12, 30, 65), (WIDTH // 2, HEIGHT // 2), 150, 1)
 
     def draw_ui(self, surf):
+        if self.state in ("select", "neon_menu", "tetris"):
+            return
+
         draw_text(surf, self.font_mid, f"SCORE {self.score}", 22, 18, WHITE)
         draw_text(surf, self.font_small, f"BEST {self.best}", 24, 48, MUTED)
         draw_text(surf, self.font_small, f"USER {self.username}", 24, 68, MUTED)
@@ -699,7 +1270,7 @@ class Game:
         draw_text(
             surf,
             self.font_small,
-            "WASD/стрелки — движение   ЛКМ — стрелять   Shift/ПКМ — рывок   Esc — меню",
+            "WASD/стрелки — движение   ЛКМ — стрелять   Shift/ПКМ — рывок   Esc — выбор игры",
             WIDTH // 2,
             HEIGHT - 18,
             MUTED,
@@ -713,11 +1284,86 @@ class Game:
         pygame.draw.rect(surf, (65, 85, 125), (x, y, w, h), 1, border_radius=8)
         draw_text(surf, self.font_small, label, x, y - 18, MUTED)
 
-    def draw_menu(self, surf):
+    def draw_select(self, surf):
+        draw_text(surf, self.font_big, "IFC GAME CENTER", WIDTH // 2, 72, CYAN, center=True)
+        draw_text(surf, self.font, "Выбери игру на время проверки моделей", WIDTH // 2, 120, MUTED, center=True)
+
+        cards = [
+            {
+                "title": "NEON CORE",
+                "subtitle": "Аркадный шутер с таблицей лидеров",
+                "accent": CYAN,
+                "rect": pygame.Rect(105, 175, 340, 250),
+                "mode": "neon",
+                "keys": "WASD • ЛКМ • Shift",
+            },
+            {
+                "title": "NEON TETRIS",
+                "subtitle": "Красивый тетрис без сохранения статистики",
+                "accent": YELLOW,
+                "rect": pygame.Rect(515, 175, 340, 250),
+                "mode": "tetris",
+                "keys": "← → ↑ ↓ • Space • C",
+            },
+        ]
+        self.select_cards = cards
+
+        mx, my = pygame.mouse.get_pos()
+
+        for i, card in enumerate(cards):
+            rect = card["rect"]
+            hovered = rect.collidepoint(mx, my)
+            selected = i == self.select_index
+            accent = card["accent"]
+
+            pulse = (math.sin(self.t * 4 + i) + 1) / 2
+            scale_glow = 1 if selected or hovered else 0.35
+
+            glow = pygame.Surface((rect.w + 60, rect.h + 60), pygame.SRCALPHA)
+            pygame.draw.rect(
+                glow,
+                (*accent, int(45 * scale_glow + pulse * 25 * scale_glow)),
+                glow.get_rect(),
+                border_radius=34
+            )
+            surf.blit(glow, (rect.x - 30, rect.y - 30), special_flags=pygame.BLEND_PREMULTIPLIED)
+
+            pygame.draw.rect(surf, (10, 18, 38), rect, border_radius=26)
+            pygame.draw.rect(surf, accent if selected or hovered else (50, 75, 115), rect, 3 if selected else 1, border_radius=26)
+
+            # Мини-иконка
+            icon_center = (rect.centerx, rect.y + 72)
+            if card["mode"] == "neon":
+                pygame.draw.circle(surf, (20, 80, 150), icon_center, 35)
+                pygame.draw.circle(surf, CYAN, icon_center, 22)
+                for a in [0, 2.1, 4.2]:
+                    ex = icon_center[0] + math.cos(a + self.t) * 70
+                    ey = icon_center[1] + math.sin(a + self.t) * 34
+                    pygame.draw.circle(surf, RED, (int(ex), int(ey)), 10)
+            else:
+                bx = rect.centerx - 42
+                by = rect.y + 42
+                preview = [("T", 1, 0), ("I", 0, 1), ("O", 2, 1), ("S", 1, 2)]
+                for kind, cx, cy in preview:
+                    color = TETRIS_COLORS[kind]
+                    pygame.draw.rect(surf, color, (bx + cx * 28, by + cy * 28, 25, 25), border_radius=6)
+                    pygame.draw.rect(surf, WHITE, (bx + cx * 28 + 4, by + cy * 28 + 4, 17, 5), border_radius=3)
+
+            draw_text(surf, self.font_mid, card["title"], rect.centerx, rect.y + 128, WHITE, center=True)
+            draw_text(surf, self.font_small, card["subtitle"], rect.centerx, rect.y + 164, MUTED, center=True)
+            draw_text(surf, self.font_small, card["keys"], rect.centerx, rect.y + 198, accent, center=True)
+
+            if selected:
+                draw_text(surf, self.font_small, "ENTER — запустить", rect.centerx, rect.y + 225, WHITE, center=True)
+
+        draw_text(surf, self.font_small, "← / → — выбрать     Enter / клик — запустить     Esc — закрыть окно игры", WIDTH // 2, 505, MUTED, center=True)
+
+    def draw_neon_menu(self, surf):
         draw_text(surf, self.font_big, "NEON CORE", WIDTH // 2, 155, CYAN, center=True)
-        draw_text(surf, self.font, "Мини-игра для IFC CHECKER", WIDTH // 2, 205, MUTED, center=True)
-        draw_text(surf, self.font_mid, "Нажми ПРОБЕЛ или ЛКМ, чтобы начать", WIDTH // 2, 270, WHITE, center=True)
+        draw_text(surf, self.font, "Шутер на выживание с таблицей лидеров", WIDTH // 2, 205, MUTED, center=True)
+        draw_text(surf, self.font_mid, "Пробел / Enter / ЛКМ — начать", WIDTH // 2, 270, WHITE, center=True)
         draw_text(surf, self.font_small, f"Текущий пользователь: {self.username}", WIDTH // 2, 310, MUTED, center=True)
+        draw_text(surf, self.font_small, "Esc — назад к выбору игры", WIDTH // 2, 342, MUTED, center=True)
 
     def draw_leaderboard(self, surf):
         panel = pygame.Rect(270, 105, 420, 350)
@@ -746,7 +1392,7 @@ class Game:
             wait_text = f"Новая попытка будет доступна через {3.0 - self.gameover_timer:.1f} сек."
             draw_text(surf, self.font, wait_text, WIDTH // 2, 490, MUTED, center=True)
         else:
-            draw_text(surf, self.font, "Enter / ЛКМ — новая попытка", WIDTH // 2, 490, MUTED, center=True)
+            draw_text(surf, self.font, "Enter / ЛКМ — новая попытка     Esc — выбор игры", WIDTH // 2, 490, MUTED, center=True)
 
     def draw(self):
         ox = oy = 0
@@ -765,34 +1411,39 @@ class Game:
         self.surface.fill((0, 0, 0, 0))
         self.draw_background(self.surface)
 
-        for orb in self.orbs:
-            orb.draw(self.surface, self.t)
+        if self.state == "tetris":
+            self.tetris.draw(self.surface)
+        else:
+            for orb in self.orbs:
+                orb.draw(self.surface, self.t)
 
-        for enemy in self.enemies:
-            enemy.draw(self.surface, self.t)
+            for enemy in self.enemies:
+                enemy.draw(self.surface, self.t)
 
-        for p in self.particles:
-            p.draw(self.surface)
+            for p in self.particles:
+                p.draw(self.surface)
 
-        if self.state == "play":
-            self.player.draw(self.surface, self.t)
+            if self.state == "play":
+                self.player.draw(self.surface, self.t)
 
-        if hasattr(self, "laser"):
-            x1, y1, x2, y2, life = self.laser
-            life -= 1 / FPS
-            if life > 0:
-                self.laser = (x1, y1, x2, y2, life)
-                pygame.draw.line(self.surface, (150, 240, 255), (x1, y1), (x2, y2), 5)
-                pygame.draw.line(self.surface, WHITE, (x1, y1), (x2, y2), 2)
-            else:
-                del self.laser
+            if hasattr(self, "laser"):
+                x1, y1, x2, y2, life = self.laser
+                life -= 1 / FPS
+                if life > 0:
+                    self.laser = (x1, y1, x2, y2, life)
+                    pygame.draw.line(self.surface, (150, 240, 255), (x1, y1), (x2, y2), 5)
+                    pygame.draw.line(self.surface, WHITE, (x1, y1), (x2, y2), 2)
+                else:
+                    del self.laser
 
-        self.draw_ui(self.surface)
+            self.draw_ui(self.surface)
 
-        if self.state == "menu":
-            self.draw_menu(self.surface)
-        elif self.state == "gameover":
-            self.draw_gameover(self.surface)
+            if self.state == "select":
+                self.draw_select(self.surface)
+            elif self.state == "neon_menu":
+                self.draw_neon_menu(self.surface)
+            elif self.state == "gameover":
+                self.draw_gameover(self.surface)
 
         self.screen.fill(BG)
         self.screen.blit(self.surface, (ox, oy))
@@ -804,25 +1455,57 @@ class Game:
                 pygame.quit()
                 sys.exit()
 
+            if self.state == "tetris":
+                self.tetris.handle_event(event)
+                continue
+
             if event.type == pygame.KEYDOWN:
+                if self.state == "select":
+                    if event.key in (pygame.K_LEFT, pygame.K_a):
+                        self.select_index = (self.select_index - 1) % 2
+                    elif event.key in (pygame.K_RIGHT, pygame.K_d):
+                        self.select_index = (self.select_index + 1) % 2
+                    elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
+                        if self.select_index == 0:
+                            self.start_neon()
+                        else:
+                            self.start_tetris()
+                    elif event.key == pygame.K_ESCAPE:
+                        pygame.quit()
+                        sys.exit()
+                    continue
+
                 if event.key == pygame.K_ESCAPE:
-                    if self.state == "play":
-                        self.state = "menu"
+                    if self.state in ("play", "neon_menu", "gameover"):
+                        self.state = "select"
+                        continue
 
                 if event.key in (pygame.K_SPACE, pygame.K_RETURN):
-                    if self.state == "menu":
+                    if self.state == "neon_menu":
                         self.state = "play"
                     elif self.state == "gameover":
                         if self.gameover_timer >= 3.0:
-                            self.reset()
+                            self.reset_neon_round()
                             self.state = "play"
 
             if event.type == pygame.MOUSEBUTTONDOWN:
-                if self.state == "menu":
+                if self.state == "select":
+                    mx, my = event.pos
+                    for i, card in enumerate(self.select_cards):
+                        if card["rect"].collidepoint(mx, my):
+                            self.select_index = i
+                            if card["mode"] == "neon":
+                                self.start_neon()
+                            else:
+                                self.start_tetris()
+                            break
+                    continue
+
+                if self.state == "neon_menu":
                     self.state = "play"
                 elif self.state == "gameover":
                     if self.gameover_timer >= 3.0:
-                        self.reset()
+                        self.reset_neon_round()
                         self.state = "play"
 
     def run(self):

@@ -1,3 +1,3 @@
 git add .
-git commit -m "Добавляются уровни"
+git commit -m "Исправлено дубрлирование + Тетрис"
 git push

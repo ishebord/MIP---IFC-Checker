@@ -769,6 +769,7 @@ class App(tk.Tk):
         self.open_after = tk.BooleanVar(value=False)
         self.create_summary = tk.BooleanVar(value=True)
         self.remove_empty_ifc_classes = tk.BooleanVar(value=False)
+        self.run_game = tk.BooleanVar(value=True)
         self.is_running = False
         self.ui_queue = queue.Queue()
 
@@ -1242,6 +1243,13 @@ class App(tk.Tk):
         )
         self.btn_run.pack(side="right", padx=(0, 10))
 
+        ttk.Checkbutton(
+            bottom,
+            text="Запускать игру",
+            variable=self.run_game,
+            style="Corp.TCheckbutton"
+        ).pack(side="right", padx=(0, 14))
+
     def _build_rule_mode_column(self, parent, column, mode_title):
         cell = tk.Frame(
             parent,
@@ -1336,6 +1344,7 @@ class App(tk.Tk):
         self.rules_mode_var.set(self.current_rules_mode)
         self.create_summary.set(bool(self.profile.create_summary))
         self.remove_empty_ifc_classes.set(bool(self.profile.remove_empty_ifc_classes))
+        self.run_game.set(bool(self.profile.run_game))
         self.reports_dir_var.set(self.profile.reports_dir or "")
         self.ifc_paths = list(self.profile.ifc_paths)
         self._refresh_ifc_list()
@@ -1346,6 +1355,7 @@ class App(tk.Tk):
         self.profile.ifc_paths = list(self.ifc_paths)
         self.profile.reports_dir = self.reports_dir_var.get().strip()
         self.profile.rules_mode = self.rules_mode_var.get()
+        self.profile.run_game = bool(self.run_game.get())
 
     def _load_rules_for_mode(self, mode_title: str):
         from ifc_ids_validator.config import load_rules
@@ -1675,7 +1685,8 @@ class App(tk.Tk):
         self.txt_log.delete("1.0", "end")
         self.set_status("Старт валидации…")
 
-        self.start_game_process()
+        if self.run_game.get():
+            self.start_game_process()
 
         threading.Thread(target=self.worker_run_two_passes, daemon=True).start()
 
@@ -1691,19 +1702,7 @@ class App(tk.Tk):
 
         items = []
 
-        # IDS читаем один раз
-        common_specs = None
-        if common_ids:
-            try:
-                self.ui_call(self.set_status, "Чтение общей IDS…")
-                common_specs = open_ids(common_ids)
-            except Exception as e:
-                self.ui_call(self.log, f"! Ошибка чтения общей IDS: {e}")
-                common_specs = None
-
-        # Правила и дисциплинарные IDS кэшируем
         rules = [r.__dict__ for r in self.profile.disc_rules]
-        discipline_specs_cache = {}
 
         try:
             for i, ifc_path in enumerate(self.ifc_paths, start=1):
@@ -1750,9 +1749,10 @@ class App(tk.Tk):
                     item["storey_names"] = get_ifc_storey_names(model)
 
                     # ---------- PASS 1: МССК ----------
-                    if common_specs:
+                    if common_ids:
                         try:
                             self.ui_call(self.set_status, f"[{i}/{total}] МССК: {name}")
+                            common_specs = open_ids(common_ids)
                             common_specs.validate(model)
 
                             out_base_common = mssk_dir / ifc_p.stem
@@ -1791,10 +1791,7 @@ class App(tk.Tk):
                         try:
                             self.ui_call(self.set_status, f"[{i}/{total}] Дисциплина: {name}")
 
-                            if d_ids not in discipline_specs_cache:
-                                discipline_specs_cache[d_ids] = open_ids(d_ids)
-
-                            d_specs = discipline_specs_cache[d_ids]
+                            d_specs = open_ids(d_ids)
                             d_specs.validate(model)
 
                             out_base_disc = disc_dir / ifc_p.stem

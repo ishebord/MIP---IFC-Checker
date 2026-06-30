@@ -123,6 +123,7 @@ class Profile:
     disc_rules: List[DisciplineRule] = field(default_factory=list)
     create_summary: bool = True
     remove_empty_ifc_classes: bool = False
+    run_game: bool = True
     rules_mode: str = "Приказ 64"
     section_descriptions: List[List[str]] = field(default_factory=list)    
 
@@ -137,6 +138,7 @@ class Profile:
             disc_rules=[],
             create_summary=bool(d.get("create_summary", True)),
             remove_empty_ifc_classes=bool(d.get("remove_empty_ifc_classes", False)),
+            run_game=bool(d.get("run_game", True)),
             rules_mode=d.get("rules_mode", "Приказ 64"),
             section_descriptions=[],
         )
@@ -148,6 +150,7 @@ class Profile:
             "reports_dir": self.reports_dir,
             "create_summary": bool(self.create_summary),
             "remove_empty_ifc_classes": bool(self.remove_empty_ifc_classes),
+            "run_game": bool(self.run_game),
             "rules_mode": self.rules_mode,
         }
 
