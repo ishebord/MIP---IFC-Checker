@@ -1,6 +1,9 @@
 # ui_main.py
 from __future__ import annotations
 import os
+from copy import deepcopy
+from datetime import datetime
+from uuid import uuid4
 import queue
 import threading
 import webbrowser
@@ -11,37 +14,37 @@ from tkinter import ttk
 import traceback
 import sys
 import subprocess
+import time
+import multiprocessing
 
 from ifc_ids_validator.config import (
-    AppConfig, DisciplineRule, Profile, CONF_PATH,
-    get_rules_path, save_rules
+    AppConfig, DisciplineRule, Profile, CONF_PATH
 )
 from ifc_ids_validator.validator import (
-    MATCH_CONTAINS,
-    match_rule, open_ids, open_ifc, emit_reports, get_ifc_site_data,
-    get_ifc_elements_count, get_ifc_storey_names,
-    _ifc_class_percent_from_html
+    MATCH_CONTAINS, match_rule, run_model_batch, available_cpu_count, model_worker_count
 )
-from ifc_ids_validator.summary import write_summary, summary_path
+from ifc_ids_validator.summary import write_summary, summary_path, record_check_history, ids_fingerprint
+from ifc_ids_validator.ifc_preview import IFCPreview
+from ifc_ids_validator.app_icon import set_app_icon
 
-APP_TITLE = "IFC → IDS HTML отчёт (двухэтапная проверка)"
+APP_TITLE = "IFC → IDS — проверка моделей проекта"
 DEFAULT_REPORT_SUBFOLDER = "Отчет IDS"
-SUB_MSSK = "МССК"
+SUB_COMMON = "Общие"
 SUB_DISC = "Дисциплинарные"
 
 # =========================
 # ФИРМЕННЫЕ ЦВЕТА / ТЕМА
 # =========================
-COLOR_BG = "#F4F7FB"
+COLOR_BG = "#F3F5F9"
 COLOR_SURFACE = "#FFFFFF"
-COLOR_SURFACE_2 = "#EEF3FA"
-COLOR_BORDER = "#D6DFEB"
-COLOR_TEXT = "#183153"
-COLOR_MUTED = "#6B7A90"
-COLOR_BLUE = "#0B4EA2"       # основной синий
-COLOR_BLUE_DARK = "#083A7A"  # тёмный синий
-COLOR_RED = "#E53935"        # акцентный красный
-COLOR_HOVER = "#0D5EC2"
+COLOR_SURFACE_2 = "#EDF2F9"
+COLOR_BORDER = "#DFE5EE"
+COLOR_TEXT = "#172A43"
+COLOR_MUTED = "#738197"
+COLOR_BLUE = "#3268E8"       # основной синий
+COLOR_BLUE_DARK = "#14243C"  # тёмный синий
+COLOR_RED = "#C94B59"        # акцентный красный
+COLOR_HOVER = "#2455CC"
 COLOR_SUCCESS = "#1F8A4D"
 
 FONT_MAIN = ("Segoe UI", 10)
@@ -54,6 +57,7 @@ FONT_SMALL = ("Segoe UI", 9)
 class RuleDialog(tk.Toplevel):
     def __init__(self, master, title="Правило дисциплины", initial: DisciplineRule | None = None):
         super().__init__(master)
+        set_app_icon(self)
         self.title(title)
         self.resizable(False, False)
         self.result = None
@@ -219,6 +223,7 @@ class RuleDialog(tk.Toplevel):
 class SectionsDescriptionDialog(tk.Toplevel):
     def __init__(self, master, rows):
         super().__init__(master)
+        set_app_icon(self)
         self.title("Описание разделов")
         self.geometry("780x620")
         self.resizable(False, False)
@@ -397,8 +402,8 @@ class SectionsDescriptionDialog(tk.Toplevel):
         entry.bind("<FocusIn>", lambda e, i=row_index: self._set_current_row(i))
         entry.bind("<Button-1>", lambda e, i=row_index: self._set_current_row(i))
         entry.bind("<MouseWheel>", self._on_mousewheel)
-        entry.bind("<Button-4>", self._on_mousewheel)  # Linux
-        entry.bind("<Button-5>", self._on_mousewheel)  # Linux
+        entry.bind("<Button-4>", self._on_mousewheel)
+        entry.bind("<Button-5>", self._on_mousewheel)
 
     def _set_current_row(self, row_index: int):
         self.current_row_index = row_index
@@ -533,152 +538,141 @@ class SectionsDescriptionDialog(tk.Toplevel):
         super().destroy()
 
 
-class RulesSettingsDialog(tk.Toplevel):
-    def __init__(self, master, profile: Profile, mode_title: str):
+class CopyIdsDialog(tk.Toplevel):
+    def __init__(self, master, profiles, target_name):
         super().__init__(master)
-        self.title(f"Настройки — {mode_title}")
-        self.geometry("980x600")
-        self.resizable(False, False)
-        self.result = False
-        self.profile = profile
-        self.mode_title = mode_title
+        set_app_icon(self)
+        self.title("Копировать IDS из другого проекта")
+        self.geometry("720x480")
+        self.minsize(540, 380)
         self.configure(bg=COLOR_BG)
-
-        self.var_common = tk.StringVar(value=self.profile.common_ids_path)
-        self.local_rules = [
-            DisciplineRule(
-                pattern=r.pattern,
-                ids_path=r.ids_path,
-                mapping_path=getattr(r, "mapping_path", "")
-            )
-            for r in self.profile.disc_rules
-        ]
-        self.local_section_descriptions = [
-            [str(row[0]), str(row[1])]
-            for row in self.profile.section_descriptions
-            if isinstance(row, (list, tuple)) and len(row) >= 2
-        ]
-        if not self.local_section_descriptions:
-            self.local_section_descriptions = [["", ""]]
-
-        outer = tk.Frame(self, bg=COLOR_BG, padx=16, pady=16)
-        outer.pack(fill="both", expand=True)
-
-        card = tk.Frame(
-            outer,
-            bg=COLOR_SURFACE,
-            highlightbackground=COLOR_BORDER,
-            highlightthickness=1
-        )
-        card.pack(fill="both", expand=True)
-
-        header = tk.Frame(card, bg=COLOR_BLUE, height=52)
-        header.pack(fill="x")
-        header.pack_propagate(False)
-
-        tk.Label(
-            header,
-            text=f"Настройки набора правил: {mode_title}",
-            bg=COLOR_BLUE,
-            fg="white",
-            font=("Segoe UI Semibold", 12)
-        ).pack(side="left", padx=16)
-
-        body = tk.Frame(card, bg=COLOR_SURFACE, padx=16, pady=16)
-        body.pack(fill="both", expand=True)
-        body.grid_columnconfigure(0, weight=1)
-        body.grid_rowconfigure(2, weight=1)
-
-        frm_header = tk.Frame(body, bg=COLOR_SURFACE)
-        frm_header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
-        frm_header.grid_columnconfigure(0, weight=1)
-
-        ttk.Label(
-            frm_header,
-            text=f"Набор настроек: {mode_title}",
-            style="SectionTitle.TLabel"
-        ).grid(row=0, column=0, sticky="w")
-        ttk.Label(
-            frm_header,
-            text=f"Файл правил: {get_rules_path(mode_title)}",
-            style="Muted.TLabel"
-        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
-
-        frm_common = ttk.LabelFrame(body, text=" Общая IDS (Классификатор МССК) ", padding=12, style="Card.TLabelframe")
-        frm_common.grid(row=1, column=0, sticky="ew", pady=(0, 12))
-        frm_common.grid_columnconfigure(1, weight=1)
-
-        ttk.Label(frm_common, text="Путь к общей IDS:", style="CardLabel.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        ttk.Entry(frm_common, textvariable=self.var_common).grid(row=0, column=1, sticky="ew")
-        ttk.Button(frm_common, text="Выбрать…", command=self.pick_common_ids, style="Secondary.TButton").grid(row=0, column=2, padx=(8, 0))
-
-        frm_rules = ttk.LabelFrame(body, text=" Правила дисциплин ", padding=12, style="Card.TLabelframe")
-        frm_rules.grid(row=2, column=0, sticky="nsew", pady=(0, 12))
-        frm_rules.grid_columnconfigure(0, weight=1)
-        frm_rules.grid_rowconfigure(0, weight=1)
-
-        left = tk.Frame(frm_rules, bg=COLOR_SURFACE)
-        left.grid(row=0, column=0, sticky="nsew")
-        right = tk.Frame(frm_rules, bg=COLOR_SURFACE)
-        right.grid(row=0, column=1, sticky="ns", padx=(12, 0))
-
-        self.rules_list = tk.Listbox(
-            left,
-            height=14,
-            font=FONT_MAIN,
-            bg="white",
-            fg=COLOR_TEXT,
-            selectbackground=COLOR_BLUE,
-            selectforeground="white",
-            relief="flat",
-            highlightthickness=1,
-            highlightbackground=COLOR_BORDER,
-            activestyle="none"
-        )
-        self.rules_list.pack(fill="both", expand=True)
-        self.refresh_rules()
-
-        ttk.Button(right, text="Добавить…", command=self.on_rule_add, style="Primary.TButton").pack(fill="x")
-        ttk.Button(right, text="Изменить…", command=self.on_rule_edit, style="Secondary.TButton").pack(fill="x", pady=6)
-        ttk.Button(right, text="Удалить", command=self.on_rule_del, style="Danger.TButton").pack(fill="x")
-
-        frm_bottom = tk.Frame(body, bg=COLOR_SURFACE)
-        frm_bottom.grid(row=3, column=0, sticky="ew")
-        frm_bottom.grid_columnconfigure(0, weight=1)
-
-        left_btns = tk.Frame(frm_bottom, bg=COLOR_SURFACE)
-        left_btns.pack(side="left")
-
-        right_btns = tk.Frame(frm_bottom, bg=COLOR_SURFACE)
-        right_btns.pack(side="right")
-
-        ttk.Button(
-            left_btns,
-            text="Описание разделов",
-            width=20,
-            command=self.open_sections_description,
-            style="Secondary.TButton"
-        ).pack(side="left")
-
-        ttk.Button(
-            right_btns,
-            text="Отмена",
-            width=16,
-            command=self.destroy,
-            style="Secondary.TButton"
-        ).pack(side="right")
-
-        ttk.Button(
-            right_btns,
-            text="Сохранить",
-            width=16,
-            command=self.on_save,
-            style="Primary.TButton"
-        ).pack(side="right", padx=(0, 8))
-
+        self.result = None
+        self.profiles = profiles
+        sources = [name for name in profiles if name != target_name]
+        self.source_var = tk.StringVar(value=sources[0] if sources else "")
+        body = tk.Frame(self, bg=COLOR_SURFACE, padx=18, pady=18)
+        body.pack(fill="both", expand=True, padx=14, pady=14)
+        ttk.Label(body, text=f"Настройки IDS для проекта «{target_name}»",
+                  style="SectionTitle.TLabel", wraplength=620).pack(anchor="w")
+        ttk.Label(body, text="Из какого проекта скопировать:",
+                  style="CardLabel.TLabel").pack(anchor="w", pady=(16, 6))
+        selector = ttk.Combobox(body, textvariable=self.source_var,
+                                values=sources, state="readonly")
+        selector.pack(fill="x")
+        selector.bind("<<ComboboxSelected>>", self.refresh_preview)
+        table = tk.Frame(body, bg=COLOR_SURFACE)
+        table.pack(fill="both", expand=True, pady=(12, 10))
+        self.preview = tk.Text(table, height=9, wrap="word", font=FONT_MAIN,
+                               bg=COLOR_SURFACE_2, fg=COLOR_TEXT, relief="flat",
+                               padx=10, pady=10, state="disabled")
+        self.preview.pack(side="left", fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(table, orient="vertical", command=self.preview.yview)
+        scrollbar.pack(side="right", fill="y")
+        self.preview.configure(yscrollcommand=scrollbar.set)
+        note = ttk.Label(body,
+            text="Общая IDS, переключатель дисциплин и все правила с путями сопоставления заменят текущие настройки IDS. Файлы IFC и папка отчётов останутся прежними.",
+            style="CardLabel.TLabel", wraplength=620)
+        note.pack(fill="x", pady=(0, 14))
+        body.bind("<Configure>", lambda event: note.configure(wraplength=max(240, event.width-36)))
+        actions = tk.Frame(body, bg=COLOR_SURFACE)
+        actions.pack(fill="x")
+        ttk.Button(actions, text="Отмена", command=self.destroy,
+                   style="Secondary.TButton").pack(side="right")
+        ttk.Button(actions, text="Скопировать", command=self.on_copy,
+                   style="Primary.TButton").pack(side="right", padx=8)
+        self.bind("<Escape>", lambda event: self.destroy())
+        self.refresh_preview()
         self.transient(master)
         self.grab_set()
-        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        selector.focus_set()
+
+    def refresh_preview(self, _event=None):
+        source = self.profiles.get(self.source_var.get())
+        lines = []
+        if source is not None:
+            lines = [
+                "Общая IDS: " + (source.common_ids_path or "не задана"),
+                "Дисциплинарные IDS: " + ("включены" if source.discipline_ids_enabled else "выключены"),
+                f"Правил по паттернам: {len(source.disc_rules)}", "",
+            ]
+            for rule in source.disc_rules:
+                lines.append(f"{rule.pattern} → {rule.ids_path or 'IDS не задана'}")
+                if rule.mapping_path:
+                    lines.append(f"  Сопоставление: {rule.mapping_path}")
+        self.preview.configure(state="normal")
+        self.preview.delete("1.0", "end")
+        self.preview.insert("1.0", "\n".join(lines))
+        self.preview.configure(state="disabled")
+
+    def on_copy(self):
+        source = self.source_var.get()
+        if source in self.profiles:
+            self.result = source
+            self.destroy()
+
+
+class RulesSettingsDialog(tk.Toplevel):
+    def __init__(self, master, profile: Profile):
+        super().__init__(master)
+        set_app_icon(self)
+        self.title(f"Дисциплинарные IDS — {profile.name}")
+        self.geometry("980x540")
+        self.minsize(760, 420)
+        self.result = False
+        self.profile = profile
+        self.configure(bg=COLOR_BG)
+        self.local_rules = deepcopy(profile.disc_rules)
+        self.local_section_descriptions = deepcopy(profile.section_descriptions)
+        body = tk.Frame(self, bg=COLOR_SURFACE, padx=18, pady=18)
+        body.pack(fill="both", expand=True, padx=14, pady=14)
+        ttk.Label(body, text=f"Правила проекта: {profile.name}",
+                  style="SectionTitle.TLabel").pack(anchor="w")
+        ttk.Label(body,
+                  text="Паттерн ищется в имени IFC без учёта регистра. Применяется первое совпавшее правило.",
+                  style="CardLabel.TLabel", wraplength=890).pack(anchor="w", pady=(8, 14))
+        table = tk.Frame(body, bg=COLOR_SURFACE)
+        table.pack(fill="both", expand=True)
+        table.grid_columnconfigure(0, weight=1)
+        table.grid_rowconfigure(0, weight=1)
+        self.rules_list = tk.Listbox(table, font=FONT_MAIN, bg="white", fg=COLOR_TEXT,
+            selectbackground=COLOR_BLUE, selectforeground="white", activestyle="none")
+        self.rules_list.grid(row=0, column=0, sticky="nsew")
+        sy = ttk.Scrollbar(table, orient="vertical", command=self.rules_list.yview)
+        sy.grid(row=0, column=1, sticky="ns")
+        sx = ttk.Scrollbar(table, orient="horizontal", command=self.rules_list.xview)
+        sx.grid(row=1, column=0, sticky="ew")
+        self.rules_list.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
+        actions = tk.Frame(table, bg=COLOR_SURFACE)
+        actions.grid(row=0, column=2, sticky="ns", padx=(12, 0))
+        for label, command in (("Добавить…", self.on_rule_add),
+                               ("Изменить…", self.on_rule_edit),
+                               ("Удалить", self.on_rule_del),
+                               ("Выше ↑", lambda: self.move_rule(-1)),
+                               ("Ниже ↓", lambda: self.move_rule(1))):
+            ttk.Button(actions, text=label, command=command,
+                       style="Secondary.TButton").pack(fill="x", pady=(0, 8))
+        self.rules_list.bind("<Double-Button-1>", lambda event: self.on_rule_edit())
+        bottom = tk.Frame(body, bg=COLOR_SURFACE)
+        bottom.pack(fill="x", pady=(14, 0))
+        ttk.Button(bottom, text="Отмена", command=self.destroy,
+                   style="Secondary.TButton").pack(side="right")
+        ttk.Button(bottom, text="Сохранить", command=self.on_save,
+                   style="Primary.TButton").pack(side="right", padx=8)
+        self.refresh_rules()
+        self.transient(master)
+        self.grab_set()
+
+    def move_rule(self, offset):
+        selected = self.rules_list.curselection()
+        if not selected:
+            return
+        index = selected[0]
+        target = index + offset
+        if 0 <= target < len(self.local_rules):
+            self.local_rules[index], self.local_rules[target] = self.local_rules[target], self.local_rules[index]
+            self.refresh_rules()
+            self.rules_list.selection_set(target)
+            self.rules_list.see(target)
 
     def refresh_rules(self):
         self.rules_list.delete(0, "end")
@@ -689,23 +683,6 @@ class RulesSettingsDialog(tk.Toplevel):
                 "end",
                 f"{r.pattern}  |  IDS: {r.ids_path}  |  TXT: {mapping_name}"
             )
-
-    def pick_common_ids(self):
-        current = self.var_common.get().strip()
-        initial_dir = Path(current).parent if current else Path.home()
-        path = filedialog.askopenfilename(
-            title="Выберите общую IDS (Классификатор МССК)",
-            filetypes=[("IDS files", "*.ids;*.xml"), ("All files", "*.*")],
-            initialdir=str(initial_dir)
-        )
-        if path:
-            self.var_common.set(path)
-
-    def open_sections_description(self):
-        dlg = SectionsDescriptionDialog(self, self.local_section_descriptions)
-        self.wait_window(dlg)
-        if dlg.result:
-            self.local_section_descriptions = dlg.result
 
     def on_rule_add(self):
         dlg = RuleDialog(self, "Добавить правило дисциплины")
@@ -735,8 +712,6 @@ class RulesSettingsDialog(tk.Toplevel):
         self.refresh_rules()
 
     def on_save(self):
-        self.profile.common_ids_path = self.var_common.get().strip()
-
         self.profile.disc_rules = [
             DisciplineRule(
                 pattern=r.pattern,
@@ -756,528 +731,884 @@ class RulesSettingsDialog(tk.Toplevel):
         self.destroy()
 
 
+class IfcRevitMappingDialog(tk.Toplevel):
+    INITIAL_ROWS_COUNT = 20
+    COLS_COUNT = 2
+
+    def __init__(self, master, rows=None):
+        super().__init__(master)
+        set_app_icon(self)
+        self.title("Сопоставление наименований IFC ↔ Revit")
+        self.geometry("920x720")
+        self.minsize(760, 560)
+        self.resizable(True, True)
+        self.configure(bg=COLOR_BG)
+        self.result = None
+
+        source_rows = rows or []
+        normalized_rows = []
+
+        for row in source_rows:
+            if isinstance(row, (list, tuple)) and len(row) >= 2:
+                normalized_rows.append([str(row[0]), str(row[1])])
+
+        while len(normalized_rows) < self.INITIAL_ROWS_COUNT:
+            normalized_rows.append(["", ""])
+
+        self.rows_vars: list[tuple[tk.StringVar, tk.StringVar]] = []
+        self.rows_widgets: list[tuple[tk.Label, tk.Entry, tk.Entry]] = []
+        self.current_row_index: int | None = None
+
+        outer = tk.Frame(self, bg=COLOR_BG, padx=16, pady=16)
+        outer.pack(fill="both", expand=True)
+
+        card = tk.Frame(
+            outer,
+            bg=COLOR_SURFACE,
+            highlightbackground=COLOR_BORDER,
+            highlightthickness=1
+        )
+        card.pack(fill="both", expand=True)
+
+        header = tk.Frame(card, bg=COLOR_BLUE, height=52)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+
+        tk.Label(
+            header,
+            text="Сопоставление наименований IFC ↔ Revit",
+            bg=COLOR_BLUE,
+            fg="white",
+            font=("Segoe UI Semibold", 12)
+        ).pack(side="left", padx=16)
+
+        body = tk.Frame(card, bg=COLOR_SURFACE, padx=16, pady=16)
+        body.pack(fill="both", expand=True)
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(2, weight=1)
+
+        info = tk.Label(
+            body,
+            text=(
+                "Ctrl+V — вставка диапазона из Excel / Google Таблиц. "
+                "Enter — добавить строку после текущей. Delete — удалить текущую строку. "
+                "Расширения .ifc и .rvt при сопоставлении игнорируются."
+            ),
+            bg=COLOR_SURFACE,
+            fg=COLOR_MUTED,
+            font=FONT_SMALL,
+            justify="left",
+            anchor="w",
+            wraplength=840
+        )
+        info.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+
+        # Таблица. Заголовок и тело используют одну и ту же геометрию:
+        # фиксированная колонка номера + две одинаковые по ширине колонки.
+        # Благодаря этому границы заголовка и строк совпадают пиксель в пиксель.
+        table_wrap = tk.Frame(body, bg=COLOR_SURFACE)
+        table_wrap.grid(row=1, column=0, rowspan=2, sticky="nsew")
+        table_wrap.grid_rowconfigure(1, weight=1)
+        table_wrap.grid_columnconfigure(0, weight=0, minsize=46)
+        table_wrap.grid_columnconfigure(1, weight=1, uniform="mapping_cols")
+        table_wrap.grid_columnconfigure(2, weight=1, uniform="mapping_cols")
+        table_wrap.grid_columnconfigure(3, weight=0)
+
+        tk.Label(
+            table_wrap,
+            text="№",
+            bg=COLOR_SURFACE_2,
+            fg=COLOR_TEXT,
+            font=("Segoe UI Semibold", 10),
+            bd=1,
+            relief="solid",
+            padx=4,
+            pady=7
+        ).grid(row=0, column=0, sticky="nsew")
+
+        tk.Label(
+            table_wrap,
+            text="Наименование IFC",
+            bg=COLOR_SURFACE_2,
+            fg=COLOR_TEXT,
+            font=("Segoe UI Semibold", 10),
+            bd=1,
+            relief="solid",
+            padx=8,
+            pady=7
+        ).grid(row=0, column=1, sticky="nsew")
+
+        tk.Label(
+            table_wrap,
+            text="Наименование Revit",
+            bg=COLOR_SURFACE_2,
+            fg=COLOR_TEXT,
+            font=("Segoe UI Semibold", 10),
+            bd=1,
+            relief="solid",
+            padx=8,
+            pady=7
+        ).grid(row=0, column=2, sticky="nsew")
+
+        # Пустой элемент над вертикальным scrollbar, чтобы заголовок
+        # заканчивался ровно там же, где и тело таблицы.
+        tk.Frame(
+            table_wrap,
+            bg=COLOR_SURFACE_2,
+            highlightbackground=COLOR_BORDER,
+            highlightthickness=1
+        ).grid(row=0, column=3, sticky="nsew")
+
+        self.canvas = tk.Canvas(
+            table_wrap,
+            bg=COLOR_SURFACE,
+            highlightthickness=0,
+            bd=0
+        )
+        self.canvas.grid(row=1, column=0, columnspan=3, sticky="nsew")
+
+        self.v_scroll = ttk.Scrollbar(
+            table_wrap,
+            orient="vertical",
+            command=self.canvas.yview
+        )
+        self.v_scroll.grid(row=1, column=3, sticky="ns")
+
+        self.canvas.configure(yscrollcommand=self.v_scroll.set)
+
+        self.table_frame = tk.Frame(self.canvas, bg=COLOR_SURFACE)
+        self.table_frame.grid_columnconfigure(0, weight=0, minsize=46)
+        self.table_frame.grid_columnconfigure(1, weight=1, uniform="mapping_cols")
+        self.table_frame.grid_columnconfigure(2, weight=1, uniform="mapping_cols")
+
+        self.canvas_window = self.canvas.create_window(
+            (0, 0),
+            window=self.table_frame,
+            anchor="nw"
+        )
+
+        self.table_frame.bind("<Configure>", self._on_frame_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind("<Button-4>", self._on_mousewheel)
+        self.canvas.bind("<Button-5>", self._on_mousewheel)
+
+        for ifc_name, revit_name in normalized_rows:
+            self._append_row(ifc_name, revit_name)
+
+        bottom = tk.Frame(body, bg=COLOR_SURFACE)
+        bottom.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+
+        ttk.Button(
+            bottom,
+            text="Очистить таблицу",
+            command=self._clear_table,
+            style="Secondary.TButton"
+        ).pack(side="left")
+
+        ttk.Button(
+            bottom,
+            text="Отмена",
+            width=16,
+            command=self.destroy,
+            style="Secondary.TButton"
+        ).pack(side="right")
+
+        ttk.Button(
+            bottom,
+            text="Сохранить",
+            width=16,
+            command=self._save,
+            style="Primary.TButton"
+        ).pack(side="right", padx=(0, 8))
+
+        self.bind_all("<Delete>", self._on_delete_key, add="+")
+        self.bind_all("<Return>", self._on_enter_key, add="+")
+        self.bind_all("<KP_Enter>", self._on_enter_key, add="+")
+
+        self.transient(master)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+    def _refresh_scrollregion(self):
+        """
+        Если строк меньше, чем высота видимой области, таблица всегда
+        прижата к верхнему краю и прокрутка по вертикали фактически
+        отключена. Если строк больше — прокрутка работает как обычно.
+        """
+        try:
+            viewport_width = max(1, self.canvas.winfo_width())
+            viewport_height = max(1, self.canvas.winfo_height())
+
+            content_height = max(1, self.table_frame.winfo_reqheight())
+
+            # Ширина содержимого всегда равна ширине Canvas.
+            # Высота scrollregion не может быть меньше высоты Canvas —
+            # благодаря этому короткую таблицу нельзя "утянуть" вниз.
+            scroll_height = max(viewport_height, content_height)
+
+            self.canvas.configure(
+                scrollregion=(0, 0, viewport_width, scroll_height)
+            )
+
+            if content_height <= viewport_height:
+                self.canvas.yview_moveto(0.0)
+
+        except Exception:
+            pass
+
+    def _on_frame_configure(self, _event=None):
+        self.after_idle(self._refresh_scrollregion)
+
+    def _on_canvas_configure(self, event):
+        self.canvas.itemconfigure(self.canvas_window, width=event.width)
+        self.after_idle(self._refresh_scrollregion)
+
+    def _on_mousewheel(self, event):
+        try:
+            content_height = self.table_frame.winfo_reqheight()
+            viewport_height = self.canvas.winfo_height()
+
+            # Короткая таблица не должна прокручиваться вообще.
+            if content_height <= viewport_height:
+                self.canvas.yview_moveto(0.0)
+                return "break"
+        except Exception:
+            pass
+
+        if getattr(event, "delta", 0):
+            self.canvas.yview_scroll(
+                int(-1 * (event.delta / 120)),
+                "units"
+            )
+        else:
+            if getattr(event, "num", None) == 4:
+                self.canvas.yview_scroll(-1, "units")
+            elif getattr(event, "num", None) == 5:
+                self.canvas.yview_scroll(1, "units")
+
+        return "break"
+
+    def _set_current_row(self, row_index: int):
+        self.current_row_index = row_index
+
+    def _bind_entry_events(self, entry: tk.Entry, row_index: int, col_index: int):
+        entry.bind("<FocusIn>", lambda e, i=row_index: self._set_current_row(i))
+        entry.bind("<Button-1>", lambda e, i=row_index: self._set_current_row(i))
+
+        # В Windows Tk сочетания <Control-v> / <Control-V> зависят от
+        # текущей раскладки. На русской раскладке keysym для физической
+        # клавиши V может быть "??", поэтому перехватываем любой KeyPress
+        # и определяем Ctrl+V по неизменному Windows virtual-key code 86.
+        entry.bind(
+            "<KeyPress>",
+            lambda event, r=row_index, c=col_index:
+                self._on_table_keypress(event, r, c)
+        )
+
+        # Резервный системный способ вставки, также независимый от раскладки.
+        entry.bind(
+            "<Shift-Insert>",
+            lambda event, r=row_index, c=col_index:
+                self._paste_from_clipboard(r, c)
+        )
+
+        entry.bind("<MouseWheel>", self._on_mousewheel)
+        entry.bind("<Button-4>", self._on_mousewheel)
+        entry.bind("<Button-5>", self._on_mousewheel)
+
+    def _on_table_keypress(self, event, row_index: int, col_index: int):
+        """
+        Универсальный Ctrl+V для Windows/Tk независимо от раскладки.
+
+        В Tk под Windows на русской раскладке:
+        - event.keysym для физической V может быть "??";
+        - event.char для Ctrl+V обычно равен '\\x16';
+        - event.keycode остаётся 86 (VK_V).
+
+        Поэтому не используем <Control-v>, а проверяем состояние Ctrl
+        и физический virtual-key code.
+        """
+        ctrl_pressed = bool(event.state & 0x0004)
+
+        if ctrl_pressed and (
+            event.keycode == 86
+            or event.char == "\x16"
+        ):
+            return self._paste_from_clipboard(row_index, col_index)
+
+        return None
+
+    def _append_row(self, ifc_name="", revit_name=""):
+        row_index = len(self.rows_vars)
+        var_ifc = tk.StringVar(value=ifc_name)
+        var_revit = tk.StringVar(value=revit_name)
+        self.rows_vars.append((var_ifc, var_revit))
+
+        number_label = tk.Label(
+            self.table_frame,
+            text=str(row_index + 1),
+            bg=COLOR_SURFACE_2,
+            fg=COLOR_MUTED,
+            font=FONT_SMALL,
+            bd=1,
+            relief="solid",
+            padx=4,
+            pady=4
+        )
+        number_label.grid(row=row_index, column=0, sticky="nsew")
+
+        entry_ifc = tk.Entry(
+            self.table_frame,
+            textvariable=var_ifc,
+            font=FONT_MAIN,
+            relief="solid",
+            bd=1
+        )
+        entry_ifc.grid(row=row_index, column=1, sticky="nsew", ipady=5)
+
+        entry_revit = tk.Entry(
+            self.table_frame,
+            textvariable=var_revit,
+            font=FONT_MAIN,
+            relief="solid",
+            bd=1
+        )
+        entry_revit.grid(row=row_index, column=2, sticky="nsew", ipady=5)
+
+        self.rows_widgets.append((number_label, entry_ifc, entry_revit))
+        self._bind_entry_events(entry_ifc, row_index, 0)
+        self._bind_entry_events(entry_revit, row_index, 1)
+        self._on_frame_configure()
+
+    def _get_rows_data(self):
+        return [(var_ifc.get(), var_revit.get()) for var_ifc, var_revit in self.rows_vars]
+
+    def _rebuild_rows(self, rows_data):
+        for number_label, entry_ifc, entry_revit in self.rows_widgets:
+            number_label.destroy()
+            entry_ifc.destroy()
+            entry_revit.destroy()
+
+        self.rows_vars = []
+        self.rows_widgets = []
+
+        for ifc_name, revit_name in rows_data:
+            self._append_row(ifc_name, revit_name)
+
+        self._on_frame_configure()
+
+    def _focus_row(self, row_index: int, col_index: int = 0):
+        if not self.rows_widgets:
+            return
+
+        row_index = max(0, min(row_index, len(self.rows_widgets) - 1))
+        self.current_row_index = row_index
+
+        widget = self.rows_widgets[row_index][1 + col_index]
+        widget.focus_set()
+
+        self.update_idletasks()
+
+        try:
+            content_height = self.table_frame.winfo_reqheight()
+            viewport_height = self.canvas.winfo_height()
+
+            # Если вся таблица помещается на экране, всегда оставляем её сверху.
+            if content_height <= viewport_height:
+                self.canvas.yview_moveto(0.0)
+                return
+
+            row_widget = self.rows_widgets[row_index][0]
+            row_top = row_widget.winfo_y()
+            row_bottom = row_top + row_widget.winfo_height()
+
+            view_top = self.canvas.canvasy(0)
+            view_bottom = view_top + viewport_height
+
+            # Прокручиваем только если выбранная строка реально вышла
+            # за пределы видимой области.
+            if row_top < view_top:
+                self.canvas.yview_moveto(
+                    max(0.0, min(1.0, row_top / content_height))
+                )
+
+            elif row_bottom > view_bottom:
+                target_top = max(0, row_bottom - viewport_height)
+                self.canvas.yview_moveto(
+                    max(0.0, min(1.0, target_top / content_height))
+                )
+
+        except Exception:
+            pass
+
+    def _on_enter_key(self, event=None):
+        widget = self.focus_get()
+        if widget is None or not self._widget_belongs_to_table(widget):
+            return
+
+        insert_after = (
+            self.current_row_index
+            if self.current_row_index is not None
+            else len(self.rows_vars) - 1
+        )
+
+        rows_data = self._get_rows_data()
+        rows_data.insert(insert_after + 1, ("", ""))
+        self._rebuild_rows(rows_data)
+        self.after(10, lambda: self._focus_row(insert_after + 1, 0))
+        return "break"
+
+    def _on_delete_key(self, event=None):
+        widget = self.focus_get()
+        if widget is None or not self._widget_belongs_to_table(widget):
+            return
+
+        if self.current_row_index is None:
+            return
+
+        rows_data = self._get_rows_data()
+
+        if len(rows_data) <= 1:
+            self.rows_vars[0][0].set("")
+            self.rows_vars[0][1].set("")
+            return "break"
+
+        del rows_data[self.current_row_index]
+        next_index = min(self.current_row_index, len(rows_data) - 1)
+        self._rebuild_rows(rows_data)
+        self.after(10, lambda: self._focus_row(next_index, 0))
+        return "break"
+
+    def _widget_belongs_to_table(self, widget):
+        parent = widget
+        while parent is not None:
+            if parent == self.table_frame:
+                return True
+            try:
+                parent = parent.master
+            except Exception:
+                break
+        return False
+
+    def _ensure_row_count(self, count: int):
+        while len(self.rows_vars) < count:
+            self._append_row("", "")
+
+    def _paste_from_clipboard(self, start_row: int, start_col: int):
+        try:
+            text = self.clipboard_get()
+        except Exception:
+            return "break"
+
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        lines = text.split("\n")
+
+        # Excel часто добавляет перевод строки в конец буфера.
+        while lines and lines[-1] == "":
+            lines.pop()
+
+        if not lines:
+            return "break"
+
+        self._ensure_row_count(start_row + len(lines))
+
+        for row_offset, line in enumerate(lines):
+            target_row = start_row + row_offset
+            values = line.split("\t")
+
+            for col_offset, value in enumerate(values):
+                target_col = start_col + col_offset
+                if target_col >= self.COLS_COUNT:
+                    break
+                self.rows_vars[target_row][target_col].set(value.strip())
+
+        self._on_frame_configure()
+        return "break"
+
+    def _clear_table(self):
+        for var_ifc, var_revit in self.rows_vars:
+            var_ifc.set("")
+            var_revit.set("")
+
+    def _save(self):
+        self.result = [
+            [var_ifc.get().strip(), var_revit.get().strip()]
+            for var_ifc, var_revit in self.rows_vars
+        ]
+        self.destroy()
+
+    def destroy(self):
+        try:
+            self.unbind_all("<Delete>")
+            self.unbind_all("<Return>")
+            self.unbind_all("<KP_Enter>")
+        except Exception:
+            pass
+        super().destroy()
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        set_app_icon(self, default=True)
         self.title(APP_TITLE)
-        self.geometry("1220x950")
-        self.resizable(False, False)
+        screen_w, screen_h = self.winfo_screenwidth(), self.winfo_screenheight()
+        width, height = min(1320, screen_w - 60), min(900, screen_h - 80)
+        self.geometry(f"{width}x{height}+{max(0, (screen_w-width)//2)}+{max(0, (screen_h-height)//2)}")
+        self.minsize(min(1040, width), min(740, height))
+        self.resizable(True, True)
         self.configure(bg=COLOR_BG)
 
         self.ifc_paths = []
+        self.ifc_preview = None
+        self._preview_selection_timer = None
+        self.ifc_filter = tk.StringVar(value="")
+        self.model_count = tk.StringVar(value="0 моделей")
+        self.model_detail = tk.StringVar(value="Добавьте IFC-файлы или папку с моделями.")
         self.reports_dir_var = tk.StringVar(value="")
         self.open_after = tk.BooleanVar(value=False)
         self.create_summary = tk.BooleanVar(value=True)
         self.remove_empty_ifc_classes = tk.BooleanVar(value=False)
         self.run_game = tk.BooleanVar(value=True)
         self.is_running = False
+        self.stop_event = threading.Event()
+        self._ui_ready = False
         self.ui_queue = queue.Queue()
 
         self.game_process = None
 
         self.cfg: AppConfig = AppConfig.load()
         self.profile: Profile = self.cfg.get_active()
-        self.current_rules_mode = self.profile.rules_mode
-        self.rules_mode_var = tk.StringVar(value=self.current_rules_mode)
+        self.common_ids_var = tk.StringVar(value=self.profile.common_ids_path)
+        self.discipline_ids_var = tk.BooleanVar(value=self.profile.discipline_ids_enabled)
+        self.parallel_workers_var = tk.StringVar(value="Авто" if not self.profile.parallel_workers else str(self.profile.parallel_workers))
 
         self._setup_style()
 
         self.grid_rowconfigure(0, weight=0)
-        self.grid_rowconfigure(1, weight=1)
-        self.grid_rowconfigure(2, weight=0)
+        self.grid_rowconfigure(1, weight=0)
+        self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
         self._build_header()
         self._build_project_tabs()
         self._build_main_ui()
         self._apply_profile_to_ui()
+        self._ui_ready = True
+        self.ifc_filter.trace_add("write", lambda *_: self._refresh_ifc_list())
+        self.bind("<Control-s>", lambda event: self.on_profile_save())
+        self.bind("<Control-o>", lambda event: self.pick_ifcs())
+        self.bind("<F5>", lambda event: self.on_run())
 
-        self.after(100, self.process_ui_queue)
+        self._ui_queue_timer = self.after(100, self.process_ui_queue)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # ---------- style ----------
     def _setup_style(self):
         style = ttk.Style(self)
-        try:
-            style.theme_use("clam")
-        except Exception:
-            pass
+        style.theme_use("clam")
+        style.configure(".", font=FONT_MAIN, background=COLOR_BG, foreground=COLOR_TEXT)
+        for name, bg, fg, pad in (
+            ("Primary", COLOR_BLUE, "white", (14, 9)),
+            ("Action", COLOR_BLUE, "white", (22, 12)),
+            ("Secondary", COLOR_SURFACE_2, COLOR_TEXT, (12, 8)),
+            ("CompactPrimary", COLOR_BLUE, "white", (10, 7)),
+            ("CompactSecondary", COLOR_SURFACE_2, COLOR_TEXT, (10, 7)),
+            ("Danger", "#FBECEF", "#AA3549", (12, 8)),
+            ("Header", "#243954", "white", (14, 9)),
+        ):
+            style.configure(name + ".TButton", background=bg, foreground=fg,
+                borderwidth=0, relief="flat", padding=pad, font=FONT_MAIN_BOLD,
+                focusthickness=1, focuscolor=fg)
+            style.map(name + ".TButton",
+                background=[("disabled", "#E8EDF4"),
+                            ("pressed", "#243954" if name == "Header" else COLOR_HOVER if name in ("Primary", "Action", "CompactPrimary") else "#CBD8ED"),
+                            ("active", "#314A6C" if name == "Header" else COLOR_HOVER if name in ("Primary", "Action", "CompactPrimary") else "#DCE5F3")],
+                foreground=[("disabled", "#98A4B5")])
+        style.configure("TEntry", fieldbackground="white", foreground=COLOR_TEXT,
+                        bordercolor=COLOR_BORDER, lightcolor=COLOR_BORDER, darkcolor=COLOR_BORDER,
+                        padding=8, insertcolor=COLOR_TEXT)
+        style.map("TEntry", bordercolor=[("focus", COLOR_BLUE)])
+        style.configure("TMenubutton", padding=(12, 8), relief="flat", background=COLOR_SURFACE_2)
+        style.configure("TNotebook", background=COLOR_SURFACE, borderwidth=0, tabmargins=0)
+        style.configure("TNotebook.Tab", background=COLOR_SURFACE, foreground=COLOR_MUTED,
+                        padding=(16, 8), font=FONT_MAIN_BOLD, borderwidth=0)
+        style.map("TNotebook.Tab", background=[("selected", "#EAF0FF"), ("active", "#F3F6FB")],
+                  foreground=[("selected", COLOR_BLUE), ("active", COLOR_TEXT)])
+        style.configure("Card.TLabelframe", background=COLOR_SURFACE, bordercolor=COLOR_BORDER,
+                        relief="solid", borderwidth=1)
+        style.configure("Card.TLabelframe.Label", background=COLOR_SURFACE,
+                        foreground=COLOR_TEXT, font=FONT_MAIN_BOLD)
+        for name, font, color in (("CardLabel", FONT_MAIN, COLOR_TEXT),
+                                  ("Muted", FONT_SMALL, COLOR_MUTED),
+                                  ("SectionTitle", ("Segoe UI Semibold", 12), COLOR_TEXT)):
+            style.configure(name + ".TLabel", background=COLOR_SURFACE, foreground=color, font=font)
+        for name in ("Corp.TCheckbutton", "Corp.TRadiobutton"):
+            style.configure(name, background=COLOR_SURFACE, foreground=COLOR_TEXT, font=FONT_MAIN)
+            style.map(name, background=[("active", COLOR_SURFACE)])
+        style.configure("Corp.Horizontal.TProgressbar", troughcolor="#E9EEF6", background=COLOR_BLUE,
+                        borderwidth=0, lightcolor=COLOR_BLUE, darkcolor=COLOR_BLUE, thickness=6)
+        style.configure("Treeview", background="white", fieldbackground="white", foreground=COLOR_TEXT,
+                        rowheight=34, borderwidth=0, font=FONT_MAIN)
+        style.configure("Treeview.Heading", background="#F5F7FB", foreground=COLOR_MUTED,
+                        relief="flat", font=FONT_SMALL, padding=(10, 8))
+        style.map("Treeview", background=[("selected", "#EAF0FF")], foreground=[("selected", COLOR_BLUE)])
+        style.configure("Vertical.TScrollbar", arrowsize=12, background="#DAE2EF", troughcolor="#F6F8FC", borderwidth=0)
+        style.configure("Horizontal.TScrollbar", arrowsize=12, background="#DAE2EF", troughcolor="#F6F8FC", borderwidth=0)
 
-        style.configure(".", font=FONT_MAIN)
-
-        style.configure(
-            "TNotebook",
-            background=COLOR_BG,
-            borderwidth=0,
-            tabmargins=(0, 0, 0, 0)
-        )
-        style.configure(
-            "TNotebook.Tab",
-            font=("Segoe UI Semibold", 10),
-            padding=(12, 6),   # неактивная вкладка меньше
-            background=COLOR_SURFACE_2,
-            foreground=COLOR_TEXT,
-            borderwidth=0
-        )
-        style.map(
-            "TNotebook.Tab",
-            background=[("selected", COLOR_BLUE), ("active", "#DDE8F8")],
-            foreground=[("selected", "white"), ("active", COLOR_TEXT)],
-            padding=[("selected", (20, 10)), ("!selected", (12, 6))]   # активная вкладка больше
-        )
-
-        style.configure(
-            "Primary.TButton",
-            background=COLOR_BLUE,
-            foreground="white",
-            borderwidth=0,
-            focusthickness=0,
-            padding=(14, 8),
-            font=("Segoe UI Semibold", 10)
-        )
-        style.map(
-            "Primary.TButton",
-            background=[("active", COLOR_HOVER), ("disabled", "#9FB6D9")],
-            foreground=[("disabled", "white")]
-        )
-
-        style.configure(
-            "Secondary.TButton",
-            background=COLOR_SURFACE_2,
-            foreground=COLOR_TEXT,
-            borderwidth=0,
-            relief="flat",
-            padding=(14, 8),
-            font=("Segoe UI Semibold", 10)
-        )
-        style.map(
-            "Secondary.TButton",
-            background=[("active", "#E4ECF8"), ("disabled", "#F1F4F8")]
-        )
-
-        style.configure(
-            "Danger.TButton",
-            background=COLOR_RED,
-            foreground="white",
-            borderwidth=0,
-            padding=(14, 8),
-            font=("Segoe UI Semibold", 10)
-        )
-        style.map(
-            "Danger.TButton",
-            background=[("active", "#C62D2A"), ("disabled", "#E9A3A1")]
-        )
-
-        style.configure(
-            "Action.TButton",
-            background=COLOR_BLUE_DARK,
-            foreground="white",
-            borderwidth=0,
-            padding=(14, 8),
-            font=("Segoe UI Semibold", 10)
-        )
-        style.map(
-            "Action.TButton",
-            background=[("active", "#0A458F"), ("disabled", "#9FB1C8")]
-        )
-
-        style.configure(
-            "Card.TLabelframe",
-            background=COLOR_SURFACE,
-            bordercolor=COLOR_BORDER,
-            relief="solid",
-            borderwidth=1
-        )
-        style.configure(
-            "Card.TLabelframe.Label",
-            background=COLOR_SURFACE,
-            foreground=COLOR_TEXT,
-            font=("Segoe UI Semibold", 10)
-        )
-
-        style.configure("CardLabel.TLabel", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=FONT_MAIN)
-        style.configure("Muted.TLabel", background=COLOR_SURFACE, foreground=COLOR_MUTED, font=FONT_SMALL)
-        style.configure("SectionTitle.TLabel", background=COLOR_SURFACE, foreground=COLOR_TEXT, font=("Segoe UI Semibold", 11))
-        style.configure("HeaderTitle.TLabel", background=COLOR_BLUE_DARK, foreground="white", font=FONT_TITLE)
-        style.configure("HeaderSub.TLabel", background=COLOR_BLUE_DARK, foreground="#D9E7FB", font=FONT_SUBTITLE)
-
-        style.configure(
-            "Corp.TRadiobutton",
-            background=COLOR_SURFACE,
-            foreground=COLOR_TEXT,
-            font=FONT_MAIN
-        )
-
-        style.configure(
-            "Corp.TCheckbutton",
-            background=COLOR_BG,
-            foreground=COLOR_TEXT,
-            font=FONT_MAIN
-        )
-
-        style.configure(
-            "Corp.Horizontal.TProgressbar",
-            troughcolor="#E6EDF7",
-            background=COLOR_BLUE,
-            bordercolor="#E6EDF7",
-            lightcolor=COLOR_BLUE,
-            darkcolor=COLOR_BLUE
-        )
-
-        style.configure(
-            "Treeview",
-            background="white",
-            foreground=COLOR_TEXT,
-            rowheight=28,
-            fieldbackground="white",
-            bordercolor=COLOR_BORDER,
-            borderwidth=1,
-            font=FONT_MAIN
-        )
-        style.configure(
-            "Treeview.Heading",
-            background=COLOR_SURFACE_2,
-            foreground=COLOR_TEXT,
-            font=("Segoe UI Semibold", 10)
-        )
-        style.map(
-            "Treeview",
-            background=[("selected", COLOR_BLUE)],
-            foreground=[("selected", "white")]
-        )
-
-    # ---------- UI ----------
     def _build_header(self):
-        header = tk.Frame(self, bg=COLOR_BLUE_DARK, height=84)
+        header = tk.Frame(self, bg=COLOR_BLUE_DARK, padx=24, pady=15)
         header.grid(row=0, column=0, sticky="ew")
-        header.grid_columnconfigure(0, weight=1)
-        header.pack_propagate(False)
-
-        left = tk.Frame(header, bg=COLOR_BLUE_DARK)
-        left.pack(side="left", fill="both", expand=True, padx=18, pady=12)
-
-        tk.Label(
-            left,
-            text="IFC CHECKER",
-            bg=COLOR_BLUE_DARK,
-            fg="white",
-            font=("Bahnschrift Light", 20)
-        ).pack(anchor="w")
-
-        tk.Label(
-            left,
-            text="Проверка IFC → IDS • HTML-отчёты",
-            bg=COLOR_BLUE_DARK,
-            fg="#D9E7FB",
-            font=("Segoe UI", 10)
-        ).pack(anchor="w", pady=(2, 0))
-
-        accent = tk.Frame(header, bg=COLOR_RED, width=10)
-        accent.pack(side="right", fill="y")
+        mark = tk.Label(header, text="IFC", font=("Segoe UI Semibold", 16), bg=COLOR_BLUE,
+                        fg="white", padx=10, pady=5)
+        mark.pack(side="left", padx=(0, 14))
+        title = tk.Frame(header, bg=COLOR_BLUE_DARK)
+        title.pack(side="left")
+        tk.Label(title, text="IFC CHECKER", bg=COLOR_BLUE_DARK, fg="white",
+                 font=("Segoe UI Semibold", 17)).pack(anchor="w")
+        tk.Label(title, text="Проверка моделей · IDS · Сводный отчёт", bg=COLOR_BLUE_DARK,
+                 fg="#AABBD0", font=FONT_SMALL).pack(anchor="w", pady=(2, 0))
+        ttk.Button(header, text="Открыть сводный отчёт  ↗", command=self.open_summary_report,
+                   style="Header.TButton").pack(side="right")
 
     def _build_project_tabs(self):
-        wrap = tk.Frame(self, bg=COLOR_BG)
-        wrap.grid(row=1, column=0, sticky="ew", padx=14, pady=(12, 0))
-        wrap.grid_columnconfigure(0, weight=1)
-
-        card = tk.Frame(
-            wrap,
-            bg=COLOR_SURFACE,
-            highlightbackground=COLOR_BORDER,
-            highlightthickness=1
-        )
-        card.grid(row=0, column=0, sticky="ew")
-        card.grid_columnconfigure(0, weight=1)
-
-        top_projects = tk.Frame(card, bg=COLOR_SURFACE, padx=14, pady=12)
-        top_projects.grid(row=0, column=0, sticky="ew")
-        top_projects.grid_columnconfigure(0, weight=1)
-
-        tabs_wrap = tk.Frame(top_projects, bg=COLOR_SURFACE)
-        tabs_wrap.grid(row=0, column=0, sticky="ew")
-        tabs_wrap.grid_columnconfigure(0, weight=1)
-        tabs_wrap.grid_rowconfigure(0, weight=1)
-
-        self.project_tabs_canvas = tk.Canvas(
-            tabs_wrap,
-            bg=COLOR_SURFACE,
-            highlightthickness=0,
-            bd=0,
-            height=42
-        )
+        bar = tk.Frame(self, bg=COLOR_SURFACE, padx=20, pady=8)
+        bar.grid(row=1, column=0, sticky="ew")
+        bar.grid_columnconfigure(1, weight=1)
+        tk.Label(bar, text="ПРОЕКТЫ", bg=COLOR_SURFACE, fg=COLOR_MUTED,
+                 font=("Segoe UI Semibold", 9)).grid(row=0, column=0, padx=(0, 16))
+        tabs = tk.Frame(bar, bg=COLOR_SURFACE)
+        tabs.grid(row=0, column=1, sticky="ew")
+        tabs.grid_columnconfigure(0, weight=1)
+        self.project_tabs_canvas = tk.Canvas(tabs, bg=COLOR_SURFACE, highlightthickness=0, height=38)
         self.project_tabs_canvas.grid(row=0, column=0, sticky="ew")
-
-        self.project_tabs_scroll = ttk.Scrollbar(
-            tabs_wrap,
-            orient="horizontal",
-            command=self.project_tabs_canvas.xview
-        )
-        self.project_tabs_scroll.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-
+        self.project_tabs_scroll = ttk.Scrollbar(tabs, orient="horizontal", command=self.project_tabs_canvas.xview)
+        self.project_tabs_scroll.grid(row=1, column=0, sticky="ew")
         self.project_tabs_canvas.configure(xscrollcommand=self.project_tabs_scroll.set)
-
         self.nb_projects = ttk.Notebook(self.project_tabs_canvas)
-        self.nb_projects_window = self.project_tabs_canvas.create_window(
-            (0, 0),
-            window=self.nb_projects,
-            anchor="nw"
-        )
-
+        self.nb_projects_window = self.project_tabs_canvas.create_window((0, 0), window=self.nb_projects, anchor="nw")
         self.nb_projects.bind("<<NotebookTabChanged>>", self.on_profile_tab_change)
         self.nb_projects.bind("<Configure>", self._update_project_tabs_scrollregion)
         self.project_tabs_canvas.bind("<Configure>", self._on_project_tabs_canvas_configure)
-
-        btns = tk.Frame(top_projects, bg=COLOR_SURFACE)
-        btns.grid(row=0, column=1, sticky="e", padx=(14, 0))
-
-        ttk.Button(btns, text="➕", width=4, command=self.on_profile_add, style="Primary.TButton").pack(side="left", padx=(0, 6))
-        ttk.Button(btns, text="Переименовать", command=self.on_profile_rename, style="Secondary.TButton").pack(side="left", padx=(0, 6))
-        ttk.Button(btns, text="Сохранить", command=self.on_profile_save, style="Secondary.TButton").pack(side="left", padx=(0, 6))
-        ttk.Button(btns, text="Экспорт", command=self.on_profile_export, style="Secondary.TButton").pack(side="left", padx=(0, 6))
-        ttk.Button(btns, text="Импорт", command=self.on_profile_import, style="Secondary.TButton").pack(side="left", padx=(0, 6))
-        ttk.Button(btns, text="Удалить", command=self.on_profile_delete, style="Danger.TButton").pack(side="left")
-
+        actions = tk.Frame(bar, bg=COLOR_SURFACE)
+        actions.grid(row=0, column=2, padx=(16, 0))
+        ttk.Button(actions, text="+ Проект", command=self.on_profile_add,
+                   style="CompactSecondary.TButton").pack(side="left", padx=(0, 8))
+        ttk.Button(actions, text="Сохранить", command=self.on_profile_save,
+                   style="CompactSecondary.TButton").pack(side="left", padx=(0, 8))
+        menu_button = ttk.Menubutton(actions, text="Действия  ▾")
+        menu_button.pack(side="left")
+        menu = tk.Menu(menu_button, tearoff=False, font=FONT_MAIN, bg="white", fg=COLOR_TEXT)
+        menu.add_command(label="Переименовать проект", command=self.on_profile_rename)
+        menu.add_command(label="Экспортировать настройки…", command=self.on_profile_export)
+        menu.add_command(label="Импортировать настройки…", command=self.on_profile_import)
+        menu.add_separator()
+        menu.add_command(label="Удалить проект…", command=self.on_profile_delete)
+        menu_button.configure(menu=menu)
         self._refresh_project_tabs()
+
+    def _card(self, parent, title, subtitle, column, weight=1):
+        card = tk.Frame(parent, bg=COLOR_SURFACE, highlightbackground=COLOR_BORDER, highlightthickness=1)
+        card.grid(row=0, column=column, sticky="nsew", padx=(0, 8) if column == 0 else (8, 0))
+        card.grid_columnconfigure(0, weight=1)
+        head = tk.Frame(card, bg=COLOR_SURFACE, padx=18, pady=12)
+        head.grid(row=0, column=0, sticky="ew")
+        ttk.Label(head, text=title, style="SectionTitle.TLabel").pack(anchor="w")
+        ttk.Label(head, text=subtitle, style="Muted.TLabel").pack(anchor="w", pady=(3, 0))
+        return card
 
     def _build_main_ui(self):
         main = tk.Frame(self, bg=COLOR_BG)
-        main.grid(row=2, column=0, sticky="nsew", padx=14, pady=12)
+        main.grid(row=2, column=0, sticky="nsew", padx=20, pady=(14, 16))
         main.grid_columnconfigure(0, weight=1)
-        main.grid_rowconfigure(1, weight=1)
+        main.grid_rowconfigure(0, weight=3)
+        main.grid_rowconfigure(2, weight=1)
+        top = tk.Frame(main, bg=COLOR_BG)
+        top.grid(row=0, column=0, sticky="nsew")
+        top.grid_columnconfigure(0, weight=3, uniform="main")
+        top.grid_columnconfigure(1, weight=2, uniform="main")
+        top.grid_rowconfigure(0, weight=1)
 
-        # Верхняя часть: IFC + правила
-        top_area = tk.Frame(main, bg=COLOR_BG)
-        top_area.grid(row=0, column=0, sticky="ew")
-        top_area.grid_columnconfigure(0, weight=1)
-        top_area.grid_columnconfigure(1, weight=1)
-
-        # ---------- IFC ----------
-        frm_ifc = ttk.LabelFrame(top_area, text=" Файлы IFC ", padding=12, style="Card.TLabelframe")
-        frm_ifc.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 10))
-        frm_ifc.grid_columnconfigure(0, weight=1)
-        frm_ifc.grid_rowconfigure(1, weight=1)
-
-        btns_ifc = tk.Frame(frm_ifc, bg=COLOR_SURFACE)
-        btns_ifc.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        ttk.Button(
-            btns_ifc,
-            text="Выбрать несколько…",
-            command=self.pick_ifcs,
-            style="Primary.TButton"
-        ).pack(side="left")
-
-        ttk.Button(
-            btns_ifc,
-            text="Выбрать папку…",
-            command=self.pick_ifc_folder,
-            style="Primary.TButton"
-        ).pack(side="left", padx=(8, 0))
-
-        ttk.Button(
-            btns_ifc,
-            text="Очистить",
-            command=self.clear_ifcs,
-            style="Secondary.TButton"
-        ).pack(side="left", padx=(8, 0))
-
-        list_wrap = tk.Frame(frm_ifc, bg=COLOR_SURFACE)
-        list_wrap.grid(row=1, column=0, sticky="nsew")
-        list_wrap.grid_columnconfigure(0, weight=1)
-        list_wrap.grid_rowconfigure(0, weight=1)
-
-        self.lst_ifc = tk.Listbox(
-            list_wrap,
-            height=10,
-            font=FONT_MAIN,
-            bg="white",
-            fg=COLOR_TEXT,
-            selectbackground=COLOR_BLUE,
-            selectforeground="white",
-            relief="flat",
-            highlightthickness=1,
-            highlightbackground=COLOR_BORDER,
-            activestyle="none"
-        )
+        models = self._card(top, "01  Модели IFC", "Добавьте модели, которые нужно проверить", 0)
+        models.grid_rowconfigure(3, weight=1)
+        toolbar = tk.Frame(models, bg=COLOR_SURFACE)
+        toolbar.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 10))
+        ttk.Button(toolbar, text="+ Файлы", command=self.pick_ifcs,
+                   style="CompactPrimary.TButton").pack(side="left")
+        ttk.Button(toolbar, text="+ Папка", command=self.pick_ifc_folder,
+                   style="CompactSecondary.TButton").pack(side="left", padx=6)
+        ttk.Button(toolbar, text="Убрать выбранные", command=self.remove_selected_ifcs,
+                   style="CompactSecondary.TButton").pack(side="left")
+        ttk.Label(toolbar, textvariable=self.model_count, style="Muted.TLabel").pack(side="right")
+        search = tk.Frame(models, bg=COLOR_SURFACE)
+        search.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 8))
+        ttk.Label(search, text="Поиск", style="Muted.TLabel").pack(side="left", padx=(0, 10))
+        ttk.Entry(search, textvariable=self.ifc_filter).pack(side="left", fill="x", expand=True)
+        ttk.Button(search, text="×", width=3, command=lambda: self.ifc_filter.set(""),
+                   style="CompactSecondary.TButton").pack(side="left", padx=(6, 0))
+        table = tk.Frame(models, bg=COLOR_SURFACE)
+        table.grid(row=3, column=0, sticky="nsew", padx=18)
+        table.grid_rowconfigure(0, weight=1); table.grid_columnconfigure(0, weight=1)
+        self.lst_ifc = ttk.Treeview(table, columns=("rule",), show="tree headings", selectmode="extended", height=5)
+        self.lst_ifc.heading("#0", text="МОДЕЛЬ IFC", anchor="w")
+        self.lst_ifc.heading("rule", text="ПРАВИЛО IDS", anchor="w")
+        self.lst_ifc.column("#0", width=285, minwidth=150, stretch=True)
+        self.lst_ifc.column("rule", width=140, minwidth=110, stretch=False)
         self.lst_ifc.grid(row=0, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(table, orient="vertical", command=self.lst_ifc.yview)
+        sb.grid(row=0, column=1, sticky="ns"); self.lst_ifc.configure(yscrollcommand=sb.set)
+        sx = ttk.Scrollbar(table, orient="horizontal", command=self.lst_ifc.xview)
+        sx.grid(row=1, column=0, sticky="ew"); self.lst_ifc.configure(xscrollcommand=sx.set)
+        self.lst_ifc.tag_configure("alternate", background="#F7F9FC")
+        self.lst_ifc.tag_configure("missing", foreground="#B15825")
+        self.lst_ifc.bind("<<TreeviewSelect>>", self.on_model_select)
+        self.lst_ifc.bind("<Double-Button-1>", self.open_ifc_preview)
+        self.lst_ifc.bind("<Delete>", lambda event: self.remove_selected_ifcs())
+        footer = tk.Frame(models, bg=COLOR_SURFACE)
+        footer.grid(row=4, column=0, sticky="ew", padx=18, pady=(6, 12))
+        self.model_detail_label = ttk.Entry(footer, textvariable=self.model_detail, state="readonly")
+        self.model_detail_label.pack(anchor="w", fill="x")
+        links = tk.Frame(footer, bg=COLOR_SURFACE)
+        links.pack(fill="x", pady=(6, 0))
+        ttk.Button(links, text="IFC ↔ Revit", command=self.open_ifc_revit_mapping,
+                   style="CompactSecondary.TButton").pack(side="left")
+        ttk.Button(links, text="Очистить список", command=self.clear_ifcs,
+                   style="CompactSecondary.TButton").pack(side="right")
 
-        sb_ifc_y = ttk.Scrollbar(
-            list_wrap,
-            orient="vertical",
-            command=self.lst_ifc.yview
-        )
-        sb_ifc_y.grid(row=0, column=1, sticky="ns")
+        ids = self._card(top, "02  Подбор IDS", "Настройки сохраняются в текущем проекте", 1)
+        body = tk.Frame(ids, bg=COLOR_SURFACE, padx=18, pady=2)
+        body.grid(row=1, column=0, sticky="nsew");body.grid_columnconfigure(0, weight=1)
+        ids_header = tk.Frame(body, bg=COLOR_SURFACE)
+        ids_header.grid(row=0, column=0, sticky="ew")
+        ttk.Label(ids_header, text="Общая IDS", style="SectionTitle.TLabel").pack(side="left")
+        ttk.Button(ids_header, text="Копировать IDS…", command=self.copy_ids_from_project,
+                   style="CompactSecondary.TButton").pack(side="right")
+        ttk.Label(body, text="Применяется ко всем моделям проекта", style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(3, 8))
+        common = tk.Frame(body, bg=COLOR_SURFACE);common.grid(row=2, column=0, sticky="ew")
+        entry = ttk.Entry(common, textvariable=self.common_ids_var, width=22)
+        entry.pack(side="left", fill="x", expand=True)
+        entry.bind("<FocusOut>", self.on_ids_settings_change)
+        ttk.Button(common, text="Выбрать…", command=self.pick_common_ids,
+                   style="CompactSecondary.TButton").pack(side="left", padx=(6, 0))
+        ttk.Separator(body).grid(row=3, column=0, sticky="ew", pady=14)
+        ttk.Checkbutton(body, text="Дисциплинарные IDS", variable=self.discipline_ids_var,
+                        command=self.on_ids_settings_change, style="Corp.TCheckbutton").grid(row=4, column=0, sticky="w")
+        self.discipline_status = ttk.Label(body, style="Muted.TLabel", wraplength=320)
+        self.discipline_status.grid(row=5, column=0, sticky="ew", pady=(6, 10))
+        self.btn_discipline_settings = ttk.Button(body, text="Настроить паттерны → IDS", command=self.open_rules_settings,
+                                                   style="Secondary.TButton")
+        self.btn_discipline_settings.grid(row=6, column=0, sticky="ew")
+        ttk.Button(body, text="Описания разделов…", command=self.open_project_sections,
+                   style="CompactSecondary.TButton").grid(row=7, column=0, sticky="w", pady=(10, 12))
+        body.bind("<Configure>", lambda event: self.discipline_status.configure(wraplength=max(180, event.width-36)))
 
-        sb_ifc_x = ttk.Scrollbar(
-            list_wrap,
-            orient="horizontal",
-            command=self.lst_ifc.xview
-        )
-        sb_ifc_x.grid(row=1, column=0, sticky="ew")
+        reports = tk.Frame(main, bg=COLOR_SURFACE, highlightbackground=COLOR_BORDER, highlightthickness=1, padx=18, pady=10)
+        reports.grid(row=1, column=0, sticky="ew", pady=12);reports.grid_columnconfigure(1, weight=1)
+        ttk.Label(reports, text="Отчёты", style="SectionTitle.TLabel").grid(row=0, column=0, padx=(0, 14), sticky="w")
+        self.reports_display_var = tk.StringVar(value="Папка рядом с первой моделью · можно изменить")
+        self.reports_dir_var.trace_add("write", lambda *_: self.reports_display_var.set(
+            self.reports_dir_var.get() or "Папка рядом с первой моделью · можно изменить"))
+        self.report_location = ttk.Entry(reports, textvariable=self.reports_display_var, state="readonly")
+        self.report_location.grid(row=0, column=1, sticky="ew")
+        ttk.Button(reports, text="Папка…", command=self.pick_reports_folder,
+                   style="CompactSecondary.TButton").grid(row=0, column=2, padx=6)
+        ttk.Button(reports, text="Открыть ↗", command=self.open_reports_folder,
+                   style="CompactSecondary.TButton").grid(row=0, column=3)
+        options = tk.Frame(reports, bg=COLOR_SURFACE);options.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+        for col, (text, var) in enumerate((("Обновлять сводный отчёт", self.create_summary),
+                                           ("Открывать отчёты моделей", self.open_after),
+                                           ("Скрывать пустые IFC-классы", self.remove_empty_ifc_classes))):
+            ttk.Checkbutton(options, text=text, variable=var, command=self.on_ids_settings_change,
+                            style="Corp.TCheckbutton").grid(row=0, column=col, sticky="w", padx=(0, 22))
+        parallel = tk.Frame(options, bg=COLOR_SURFACE)
+        parallel.grid(row=0, column=3, sticky="e")
+        ttk.Label(parallel, text="Процессов:", style="Muted.TLabel").pack(side="left", padx=(0, 6))
+        limit = min(available_cpu_count(), 61) if os.name == "nt" else available_cpu_count()
+        self.worker_selector = ttk.Combobox(parallel, textvariable=self.parallel_workers_var,
+            values=["Авто"] + [str(count) for count in range(1, limit+1)], state="readonly", width=6)
+        self.worker_selector.pack(side="left")
+        self.worker_selector.bind("<<ComboboxSelected>>", self.on_ids_settings_change)
 
-        self.lst_ifc.config(
-            yscrollcommand=sb_ifc_y.set,
-            xscrollcommand=sb_ifc_x.set
-        )
-
-        # ---------- RULES ----------
-        frm_modes = ttk.LabelFrame(top_area, text=" Наборы правил ", padding=12, style="Card.TLabelframe")
-        frm_modes.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=(0, 10))
-        for c in range(3):
-            frm_modes.grid_columnconfigure(c, weight=1)
-
-        self._build_rule_mode_column(frm_modes, 0, "Приказ 64")
-        self._build_rule_mode_column(frm_modes, 1, "Приказ 178")
-        self._build_rule_mode_column(frm_modes, 2, "Настроить")
-
-        # Средняя часть: опции + прогресс + лог
-        content = tk.Frame(main, bg=COLOR_BG)
-        content.grid(row=1, column=0, sticky="nsew")
-        content.grid_columnconfigure(0, weight=1)
-        content.grid_rowconfigure(2, weight=1)
-
-        # Options
-        frm_opts = tk.Frame(content, bg=COLOR_BG)
-        frm_opts.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-
-        ttk.Checkbutton(
-            frm_opts,
-            text="Открывать отчёты после генерации",
-            variable=self.open_after,
-            style="Corp.TCheckbutton"
-        ).pack(side="left")
-
-        self.create_summary.set(bool(self.profile.create_summary))
-        ttk.Checkbutton(
-            frm_opts,
-            text="Создать сводный HTML",
-            variable=self.create_summary,
-            style="Corp.TCheckbutton"
-        ).pack(side="left", padx=(18, 0))
-
-        ttk.Checkbutton(
-            frm_opts,
-            text="Удалить пустые Ifc классы",
-            variable=self.remove_empty_ifc_classes,
-            style="Corp.TCheckbutton"
-        ).pack(side="left", padx=(18, 0))
-
-        ttk.Button(
-            frm_opts,
-            text="Открыть папку отчётов",
-            command=self.open_reports_folder,
-            style="Secondary.TButton"
-        ).pack(side="right")
-
-        ttk.Button(
-            frm_opts,
-            text="Папка сохранения отчётов…",
-            command=self.pick_reports_folder,
-            style="Secondary.TButton"
-        ).pack(side="right", padx=(0, 8))
-
-        # Progress card
-        frm_prog = ttk.LabelFrame(content, text=" Статус ", padding=12, style="Card.TLabelframe")
-        frm_prog.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-
-        self.lbl_progress = ttk.Label(frm_prog, text="Готово.", style="SectionTitle.TLabel", anchor="w")
-        self.lbl_progress.pack(fill="x")
-        self.pb = ttk.Progressbar(frm_prog, orient="horizontal", mode="determinate", style="Corp.Horizontal.TProgressbar")
-        self.pb.pack(fill="x", pady=(8, 0), ipady=5)
-        
-        # Log
-        log_game = tk.Frame(content, bg=COLOR_BG)
-        log_game.grid(row=2, column=0, sticky="nsew")
-        log_game.grid_columnconfigure(0, weight=1)
-        log_game.grid_columnconfigure(1, weight=0)
-        log_game.grid_rowconfigure(0, weight=1)
-
-        # Log card
-        frm_log = ttk.LabelFrame(log_game, text=" Журнал ", padding=12, style="Card.TLabelframe")
-        frm_log.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        frm_log.grid_columnconfigure(0, weight=1)
-        frm_log.grid_rowconfigure(0, weight=1)
-
-        text_wrap = tk.Frame(frm_log, bg=COLOR_SURFACE)
-        text_wrap.grid(row=0, column=0, sticky="nsew")
-        text_wrap.grid_columnconfigure(0, weight=1)
-        text_wrap.grid_rowconfigure(0, weight=1)
-
-        self.txt_log = tk.Text(
-            text_wrap,
-            height=13,
-            font=("Consolas", 10),
-            bg="white",
-            fg=COLOR_TEXT,
-            relief="flat",
-            wrap="word",
-            highlightthickness=1,
-            highlightbackground=COLOR_BORDER,
-            insertbackground=COLOR_TEXT
-        )
+        journal = tk.Frame(main, bg=COLOR_SURFACE, highlightbackground=COLOR_BORDER, highlightthickness=1, padx=18, pady=10)
+        journal.grid(row=2, column=0, sticky="nsew");journal.grid_columnconfigure(0, weight=1);journal.grid_rowconfigure(2, weight=1)
+        head = tk.Frame(journal, bg=COLOR_SURFACE);head.grid(row=0, column=0, sticky="ew")
+        ttk.Label(head, text="Журнал проверки", style="SectionTitle.TLabel").pack(side="left")
+        self.lbl_progress = ttk.Label(head, text="Готово к проверке", style="Muted.TLabel", anchor="e")
+        self.lbl_progress.pack(side="right", fill="x", expand=True, padx=(20, 0))
+        self.pb = ttk.Progressbar(journal, mode="determinate", style="Corp.Horizontal.TProgressbar")
+        self.pb.grid(row=1, column=0, sticky="ew", pady=(8, 8))
+        log = tk.Frame(journal, bg=COLOR_SURFACE);log.grid(row=2, column=0, sticky="nsew")
+        log.grid_columnconfigure(0, weight=1);log.grid_rowconfigure(0, weight=1)
+        self.txt_log = tk.Text(log, height=3, font=("Consolas", 10), bg=COLOR_SURFACE, fg=COLOR_MUTED,
+                             relief="flat", highlightthickness=0, wrap="word", padx=2, pady=4)
         self.txt_log.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(log, orient="vertical", command=self.txt_log.yview)
+        scroll.grid(row=0, column=1, sticky="ns");self.txt_log.configure(yscrollcommand=scroll.set)
+        for tag, color in (("error", "#BF4053"), ("success", "#238565"), ("warning", "#A56823")):
+            self.txt_log.tag_configure(tag, foreground=color)
+        self.txt_log.insert("end", "Здесь появятся результаты проверки моделей.\n")
+        bottom = tk.Frame(main, bg=COLOR_BG);bottom.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        tk.Label(bottom, text="F5 — проверить   ·   Ctrl+O — добавить IFC   ·   Ctrl+S — сохранить",
+                 bg=COLOR_BG, fg=COLOR_MUTED, font=("Segoe UI", 8)).pack(side="left")
+        self.btn_run = ttk.Button(bottom, text="Проверить модели  →", command=self.on_run, style="Action.TButton")
+        self.btn_run.pack(side="right")
+        self.btn_stop = ttk.Button(bottom, text="Остановить", command=self.on_stop, state="disabled", style="Danger.TButton")
+        self.btn_stop.pack(side="right", padx=8)
+        ttk.Checkbutton(bottom, text="Игра", variable=self.run_game, command=self.on_ids_settings_change,
+                        style="Corp.TCheckbutton").pack(side="right", padx=(0, 14))
 
-        sb_log = ttk.Scrollbar(text_wrap, orient="vertical", command=self.txt_log.yview)
-        sb_log.grid(row=0, column=1, sticky="ns")
-        self.txt_log.config(yscrollcommand=sb_log.set)
-        
-        # Bottom buttons
-        bottom = tk.Frame(main, bg=COLOR_BG)
-        bottom.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+    def open_summary_report(self):
+        target = self.get_reports_root_dir() / "__Сводный_ИДС_отчет.html"
+        if not target.is_file():
+            messagebox.showinfo("Сводный отчёт", "Сначала запустите проверку с включённым обновлением сводного отчёта.", parent=self)
+            return
+        webbrowser.open(target.resolve().as_uri())
 
-        self.btn_stop = ttk.Button(
-            bottom,
-            text="Остановить",
-            command=self.on_stop,
-            state="disabled",
-            style="Danger.TButton",
-            width=34
-        )
-        self.btn_stop.pack(side="right")
+    def on_model_select(self, _event=None):
+        selected = self.lst_ifc.selection()
+        if selected:
+            self.model_detail.set(self.ifc_paths[int(selected[0])])
+        if self._preview_selection_timer is not None:
+            self.after_cancel(self._preview_selection_timer)
+            self._preview_selection_timer = None
+        if len(selected) == 1:
+            self._preview_selection_timer = self.after(250, self.open_ifc_preview)
 
-        self.btn_run = ttk.Button(
-            bottom,
-            text="Проверить все модели (МССК → дисциплины)",
-            command=self.on_run,
-            style="Action.TButton",
-            width=34
-        )
-        self.btn_run.pack(side="right", padx=(0, 10))
+    def open_ifc_preview(self, _event=None):
+        if self._preview_selection_timer is not None:
+            self.after_cancel(self._preview_selection_timer)
+            self._preview_selection_timer = None
+        selected = self.lst_ifc.selection()
+        if len(selected) != 1:
+            return
+        path = self.ifc_paths[int(selected[0])]
+        preview = self.ifc_preview
+        if preview is not None and preview.winfo_exists() and preview.path == path:
+            preview.lift()
+            return
+        self._close_ifc_preview()
+        self.ifc_preview = IFCPreview(self, path)
 
-        ttk.Checkbutton(
-            bottom,
-            text="Запускать игру",
-            variable=self.run_game,
-            style="Corp.TCheckbutton"
-        ).pack(side="right", padx=(0, 14))
+    def _close_ifc_preview(self):
+        # __dict__ also supports headless controller tests built without Tk.__init__.
+        timer = self.__dict__.get("_preview_selection_timer")
+        if timer is not None:
+            self.after_cancel(timer)
+            self._preview_selection_timer = None
+        preview = self.__dict__.get("ifc_preview")
+        if preview is not None and preview.winfo_exists():
+            preview.destroy()
+        self.ifc_preview = None
 
-    def _build_rule_mode_column(self, parent, column, mode_title):
-        cell = tk.Frame(
-            parent,
-            bg=COLOR_SURFACE,
-            highlightbackground=COLOR_BORDER,
-            highlightthickness=1
-        )
-        cell.grid(row=0, column=column, sticky="nsew", padx=6)
-        cell.grid_columnconfigure(0, weight=1)
-
-        top = tk.Frame(cell, bg=COLOR_SURFACE, padx=12, pady=12)
-        top.pack(fill="both", expand=True)
-
-        ttk.Radiobutton(
-            top,
-            text=f"Использовать «{mode_title}»",
-            variable=self.rules_mode_var,
-            value=mode_title,
-            command=self.on_rules_mode_change,
-            style="Corp.TRadiobutton"
-        ).pack(anchor="w", pady=(0, 12))
-
-        ttk.Button(
-            top,
-            text=mode_title,
-            command=lambda m=mode_title: self.open_rules_settings(m),
-            style="Primary.TButton"
-        ).pack(fill="x")
+    def remove_selected_ifcs(self):
+        selected = {int(value) for value in self.lst_ifc.selection()}
+        if not selected:
+            return
+        self.ifc_paths = [path for index, path in enumerate(self.ifc_paths) if index not in selected]
+        self.profile.ifc_paths = list(self.ifc_paths)
+        self._refresh_ifc_list()
+        self.cfg.save()
 
     # ---------- helpers ----------
     def _update_project_tabs_scrollregion(self, _event=None):
@@ -1318,7 +1649,8 @@ class App(tk.Tk):
         self._update_project_tabs_scrollregion()
 
     def log(self, msg: str):
-        self.txt_log.insert("end", msg + "\n")
+        tag = "error" if "❌" in msg or "ошибка" in msg.casefold() else "success" if "✅" in msg or "🆗" in msg else "warning" if "🟡" in msg or "⚠" in msg else ""
+        self.txt_log.insert("end", msg + "\n", tag)
         self.txt_log.see("end")
         self.update_idletasks()
 
@@ -1330,6 +1662,7 @@ class App(tk.Tk):
         self.ui_queue.put((fn, args, kwargs))
 
     def process_ui_queue(self):
+        self._ui_queue_timer = None
         try:
             while True:
                 fn, args, kwargs = self.ui_queue.get_nowait()
@@ -1337,14 +1670,18 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         finally:
-            self.after(100, self.process_ui_queue)
+            if not self.__dict__.get("_app_destroyed", False):
+                self._ui_queue_timer = self.after(100, self.process_ui_queue)
 
     def _apply_profile_to_ui(self):
-        self.current_rules_mode = self.profile.rules_mode
-        self.rules_mode_var.set(self.current_rules_mode)
+        self.title(f"IFC CHECKER — {self.profile.name}")
+        self.common_ids_var.set(self.profile.common_ids_path)
+        self.discipline_ids_var.set(self.profile.discipline_ids_enabled)
+        self._refresh_ids_controls()
         self.create_summary.set(bool(self.profile.create_summary))
         self.remove_empty_ifc_classes.set(bool(self.profile.remove_empty_ifc_classes))
         self.run_game.set(bool(self.profile.run_game))
+        self.parallel_workers_var.set("Авто" if not self.profile.parallel_workers else str(self.profile.parallel_workers))
         self.reports_dir_var.set(self.profile.reports_dir or "")
         self.ifc_paths = list(self.profile.ifc_paths)
         self._refresh_ifc_list()
@@ -1354,35 +1691,37 @@ class App(tk.Tk):
         self.profile.remove_empty_ifc_classes = bool(self.remove_empty_ifc_classes.get())
         self.profile.ifc_paths = list(self.ifc_paths)
         self.profile.reports_dir = self.reports_dir_var.get().strip()
-        self.profile.rules_mode = self.rules_mode_var.get()
+        self.profile.common_ids_path = self.common_ids_var.get().strip()
+        self.profile.discipline_ids_enabled = bool(self.discipline_ids_var.get())
         self.profile.run_game = bool(self.run_game.get())
-
-    def _load_rules_for_mode(self, mode_title: str):
-        from ifc_ids_validator.config import load_rules
-
-        rules_data = load_rules(mode_title)
-        self.profile.rules_mode = mode_title
-        self.profile.common_ids_path = rules_data.get("common_ids_path", "")
-        self.profile.disc_rules = list(rules_data.get("disc_rules", []))
-        self.profile.section_descriptions = [
-            [str(row[0]), str(row[1])]
-            for row in rules_data.get("section_descriptions", [])
-            if isinstance(row, (list, tuple)) and len(row) >= 2
-        ]
-        self.current_rules_mode = mode_title
-        self.rules_mode_var.set(mode_title)
+        workers = self.parallel_workers_var.get()
+        self.profile.parallel_workers = 0 if workers == "Авто" else max(0, int(workers))
 
     def _refresh_ifc_list(self):
-        self.lst_ifc.delete(0, "end")
-        for p in self.ifc_paths:
-            self.lst_ifc.insert("end", p)
+        self._close_ifc_preview()
+        self.lst_ifc.delete(*self.lst_ifc.get_children())
+        query = self.ifc_filter.get().strip().casefold()
+        rules = [rule.__dict__ for rule in self.profile.disc_rules]
+        visible = 0
+        for index, path in enumerate(self.ifc_paths):
+            name = Path(path).name
+            if query and query not in str(path).casefold():
+                continue
+            rule, _ = match_rule(name, rules) if self.profile.discipline_ids_enabled else (None, None)
+            label = (rule["pattern"] if rule else "Без правила") if self.profile.discipline_ids_enabled else "Общая IDS"
+            tags = ["alternate"] if visible % 2 else []
+            if not Path(path).is_file():
+                tags.append("missing");label = "Файл не найден"
+            self.lst_ifc.insert("", "end", iid=str(index), text=name, values=(label,), tags=tags)
+            visible += 1
+        self.model_count.set(f"{visible} из {len(self.ifc_paths)}" if query else f"Моделей: {len(self.ifc_paths)}")
+        self.model_detail.set("Выберите модель, чтобы увидеть полный путь." if visible else
+                              ("Нет совпадений. Измените поисковый запрос." if self.ifc_paths else "Добавьте IFC-файлы или папку с моделями."))
 
     # ---------- project tabs ----------
     def on_profile_tab_change(self, _evt=None):
-        if not self.nb_projects.tabs():
+        if not self._ui_ready or not self.nb_projects.tabs():
             return
-
-        self._collect_ui_to_profile()
 
         current_tab = self.nb_projects.select()
         if not current_tab:
@@ -1390,15 +1729,19 @@ class App(tk.Tk):
 
         idx = self.nb_projects.index(current_tab)
         sel = self._tab_profile_names[idx]
+        if sel == self.profile.name:
+            return
+        self._collect_ui_to_profile()
 
         self.cfg.set_active(sel)
         self.profile = self.cfg.get_active()
-        self._load_rules_for_mode(self.profile.rules_mode)
         self._apply_profile_to_ui()
         self.cfg.save()
 
     def on_profile_add(self):
-        name = simpledialog.askstring("Новый проект", "Название проекта:", parent=self) or ""
+        name = simpledialog.askstring("Новый проект", "Название проекта:", parent=self)
+        if name is None:
+            return
         name = name.strip() or "Project"
         self._collect_ui_to_profile()
         self.profile = self.cfg.create_profile(name)
@@ -1469,32 +1812,75 @@ class App(tk.Tk):
             self._refresh_project_tabs()
             self._apply_profile_to_ui()
 
-    # ---------- rules ----------
-    def on_rules_mode_change(self):
-        selected_mode = self.rules_mode_var.get()
-        if not selected_mode:
+    # ---------- project IDS ----------
+    def copy_ids_from_project(self):
+        if len(self.cfg.profiles) < 2:
+            messagebox.showinfo("Копирование IDS",
+                "Создайте или импортируйте ещё один проект, чтобы скопировать его настройки IDS.", parent=self)
             return
-        self._load_rules_for_mode(selected_mode)
+        self._collect_ui_to_profile()
+        dialog = CopyIdsDialog(self, self.cfg.profiles, self.profile.name)
+        self.wait_window(dialog)
+        if dialog.result is None:
+            return
+        try:
+            self.cfg.copy_project_ids(dialog.result, self.profile.name)
+        except Exception as exc:
+            messagebox.showerror("Не удалось скопировать IDS", str(exc), parent=self)
+            return
+        self._apply_profile_to_ui()
+        self.set_status(f"IDS скопирована из проекта «{dialog.result}»")
+        self.log(f"✅ Настройки IDS скопированы из «{dialog.result}» в «{self.profile.name}» и сохранены.")
+
+    def _refresh_ids_controls(self):
+        enabled = bool(self.discipline_ids_var.get())
+        self.btn_discipline_settings.configure(state="normal" if enabled else "disabled")
+        count = len(self.profile.disc_rules)
+        self.discipline_status.configure(text=(
+            f"Правил: {count}. Дополнительная проверка по имени IFC."
+            if enabled else "Выключено. Проверка только по общей IDS."
+        ))
+
+    def on_ids_settings_change(self, _event=None):
+        if not self._ui_ready:
+            return
+        self._collect_ui_to_profile()
+        self._refresh_ids_controls()
+        self._refresh_ifc_list()
         self.cfg.save()
 
-    def open_rules_settings(self, mode_title: str):
-        self.rules_mode_var.set(mode_title)
-        self._load_rules_for_mode(mode_title)
+    def pick_common_ids(self):
+        current = self.common_ids_var.get().strip()
+        path = filedialog.askopenfilename(
+            title="Общая IDS для всех моделей проекта",
+            filetypes=[("IDS files", "*.ids;*.xml"), ("All files", "*.*")],
+            initialdir=str(Path(current).parent if current else Path.home())
+        )
+        if path:
+            self.common_ids_var.set(path)
+            self.on_ids_settings_change()
 
-        dlg = RulesSettingsDialog(self, self.profile, mode_title)
+    def open_rules_settings(self):
+        if not self.discipline_ids_var.get():
+            return
+        self._collect_ui_to_profile()
+        dlg = RulesSettingsDialog(self, self.profile)
         self.wait_window(dlg)
         if dlg.result:
-            self.profile.rules_mode = mode_title
-            self.rules_mode_var.set(mode_title)
-
-            save_rules(
-                mode_title,
-                self.profile.common_ids_path,
-                self.profile.disc_rules,
-                self.profile.section_descriptions
-            )
-
             self.cfg.save()
+            self._refresh_ids_controls()
+            self._refresh_ifc_list()
+
+    def open_project_sections(self):
+        self._collect_ui_to_profile()
+        dlg = SectionsDescriptionDialog(self, self.profile.section_descriptions)
+        self.wait_window(dlg)
+        if dlg.result is not None:
+            self.profile.section_descriptions = deepcopy(dlg.result)
+            self.cfg.save()
+
+    def report_callback_exception(self, exc_type, exc_value, exc_tb):
+        messagebox.showerror("Ошибка", str(exc_value), parent=self)
 
     # ---------- IFC ----------
     def pick_ifcs(self):
@@ -1509,7 +1895,7 @@ class App(tk.Tk):
         if not paths:
             return
 
-        self.ifc_paths = self._normalize_ifc_paths(paths)
+        self.ifc_paths = self._normalize_ifc_paths([*self.ifc_paths, *paths])
         self.profile.ifc_paths = list(self.ifc_paths)
 
         self._refresh_ifc_list()
@@ -1549,7 +1935,7 @@ class App(tk.Tk):
             )
             return
 
-        self.ifc_paths = self._normalize_ifc_paths(found_files)
+        self.ifc_paths = self._normalize_ifc_paths([*self.ifc_paths, *found_files])
         self.profile.ifc_paths = list(self.ifc_paths)
         self.profile.last_ifc_dir = str(root)
 
@@ -1577,14 +1963,79 @@ class App(tk.Tk):
         # убираем дубли и сортируем
         return sorted(set(result), key=lambda x: x.lower())
 
+    def open_ifc_revit_mapping(self):
+        dlg = IfcRevitMappingDialog(self, self.profile.ifc_revit_names)
+        self.wait_window(dlg)
+
+        if dlg.result is None:
+            return
+
+        self.profile.ifc_revit_names = [
+            [str(row[0]).strip(), str(row[1]).strip()]
+            for row in dlg.result
+            if isinstance(row, (list, tuple)) and len(row) >= 2
+        ]
+        self.cfg.save()
+
+    @staticmethod
+    def _normalize_model_name_for_mapping(value: str) -> str:
+        """
+        Нормализация имени для прямого сопоставления IFC ↔ Revit.
+
+        Игнорируем регистр и конечные расширения .ifc / .rvt.
+        Например, все варианты ниже считаются одним именем:
+        MODEL_AR
+        MODEL_AR.ifc
+        MODEL_AR.rvt
+        """
+        name = (value or "").strip()
+        if not name:
+            return ""
+
+        # Если пользователь вставил полный путь, сравниваем только имя файла.
+        name = Path(name).name.strip()
+        lowered = name.casefold()
+
+        for suffix in (".ifc", ".rvt"):
+            if lowered.endswith(suffix):
+                name = name[:-len(suffix)]
+                break
+
+        return name.strip().casefold()
+
+    def _get_revit_name_for_ifc(self, ifc_filename: str, profile=None) -> str:
+        """
+        Прямое сопоставление по имени модели.
+        Регистр и расширения .ifc / .rvt не учитываются.
+        """
+        target = self._normalize_model_name_for_mapping(ifc_filename)
+        if not target:
+            return ""
+
+        for row in (profile if profile is not None else self.profile).ifc_revit_names:
+            if not isinstance(row, (list, tuple)) or len(row) < 2:
+                continue
+
+            ifc_name = str(row[0]).strip()
+            revit_name = str(row[1]).strip()
+
+            if (
+                ifc_name
+                and self._normalize_model_name_for_mapping(ifc_name) == target
+            ):
+                return revit_name
+
+        return ""
+
     def clear_ifcs(self):
         self.ifc_paths = []
         self.profile.ifc_paths = []
         self._refresh_ifc_list()
         self.cfg.save()
 
-    def get_reports_root_dir(self, ifc_path: str | None = None) -> Path:
-        reports_dir = self.profile.reports_dir.strip() if self.profile.reports_dir else ""
+    def get_reports_root_dir(self, ifc_path: str | None = None, profile=None) -> Path:
+        profile = profile if profile is not None else self.profile
+        reports_dir = profile.reports_dir.strip() if profile.reports_dir else ""
 
         if reports_dir:
             return Path(reports_dir)
@@ -1674,207 +2125,199 @@ class App(tk.Tk):
         self.cfg.save()
 
         cids = self.profile.common_ids_path
-        if cids and not Path(cids).exists():
-            messagebox.showwarning("Не найдена общая IDS", f"Файл не найден:\n{cids}")
+        if not cids or not Path(cids).is_file():
+            messagebox.showwarning("Общая IDS", "Выберите существующий файл общей IDS для проекта.")
             return
+        if self.profile.discipline_ids_enabled:
+            if not self.profile.disc_rules:
+                messagebox.showwarning("Дисциплинарные IDS", "Добавьте хотя бы одно правило или отключите дисциплинарные IDS.")
+                return
+            rules = [r.__dict__ for r in self.profile.disc_rules]
+            for ifc_path in self.ifc_paths:
+                rule, _ = match_rule(Path(ifc_path).name, rules)
+                if rule:
+                    for key, label in (("ids_path", "IDS дисциплины"), ("mapping_path", "файл сопоставления")):
+                        value = (rule.get(key) or "").strip()
+                        if (key == "ids_path" or value) and (not value or not Path(value).is_file()):
+                            messagebox.showwarning("Файл не найден", f"Правило «{rule['pattern']}»: {label}\n{value}")
+                            return
+        report_root = self.get_reports_root_dir(self.ifc_paths[0]).resolve()
+        # A dashboard folder belongs to one project; otherwise matching IFC names
+        # in different projects would replace each other's results.
+        for other in self.cfg.profiles.values():
+            if other is self.profile or not other.reports_dir:
+                continue
+            if os.path.normcase(str(Path(other.reports_dir).resolve())) == os.path.normcase(str(report_root)):
+                messagebox.showwarning(
+                    "Папка другого проекта",
+                    f"Эта папка отчётов уже используется проектом «{other.name}».\n"
+                    "Выберите отдельную папку отчётов для текущего проекта."
+                )
+                return
+        if not self.profile.reports_dir:
+            self.profile.reports_dir = str(report_root)
+            self.reports_dir_var.set(self.profile.reports_dir)
+            self.cfg.save()
+        profile_snapshot = deepcopy(self.profile)
+        paths_snapshot = tuple(self.ifc_paths)
+        names = {}
+        for path in paths_snapshot:
+            key = Path(path).stem.casefold()
+            if key in names:
+                messagebox.showwarning("Совпадают имена моделей",
+                    "Эти модели записывают отчёт под одним именем. Оставьте одну модель или переименуйте файлы:\n\n"
+                    + names[key] + "\n" + path, parent=self)
+                return
+            names[key] = path
+        open_after = bool(self.open_after.get())
+        self.stop_event.clear()
 
         self.is_running = True
         self.btn_run.config(state="disabled")
         self.btn_stop.config(state="normal")
-        self.pb.config(value=0, maximum=len(self.ifc_paths) * 2)
+        self.pb.config(value=0, maximum=len(paths_snapshot))
+        self.worker_selector.configure(state="disabled")
         self.txt_log.delete("1.0", "end")
         self.set_status("Старт валидации…")
 
         if self.run_game.get():
             self.start_game_process()
 
-        threading.Thread(target=self.worker_run_two_passes, daemon=True).start()
+        threading.Thread(target=self.worker_run_two_passes,
+                         args=(profile_snapshot, paths_snapshot, open_after), daemon=True).start()
 
     def on_stop(self):
+        self.stop_event.set()
+        self.btn_stop.configure(state="disabled")
+        self.set_status("Остановка после текущей операции…")
+
+    def _finish_run(self):
         self.is_running = False
+        self.btn_run.configure(state="normal")
+        self.btn_stop.configure(state="disabled")
+        self.worker_selector.configure(state="readonly")
+        if getattr(self, "_close_when_finished", False):
+            self.stop_game_process()
+            self.destroy()
 
-    def worker_run_two_passes(self):
-        total = len(self.ifc_paths)
-        open_after = self.open_after.get()
-        make_summary = bool(self.create_summary.get())
-        remove_empty_ifc_classes = bool(self.remove_empty_ifc_classes.get())
-        common_ids = self.profile.common_ids_path
-
-        items = []
-
-        rules = [r.__dict__ for r in self.profile.disc_rules]
-
+    def worker_run_two_passes(self, profile, ifc_paths, open_after):
+        total = len(ifc_paths)
+        history_run_id = uuid4().hex
+        started = time.perf_counter()
+        completed = {}
+        errors = False
+        tasks = []
         try:
-            for i, ifc_path in enumerate(self.ifc_paths, start=1):
-                if not self.is_running:
-                    self.ui_call(self.set_status, "Остановлено пользователем.")
-                    break
-
-                ifc_p = Path(ifc_path)
-                name = ifc_p.name
-
-                root_dir = self.get_reports_root_dir(ifc_path)
-                mssk_dir = root_dir / SUB_MSSK
-                disc_dir = root_dir / SUB_DISC
-                mssk_dir.mkdir(parents=True, exist_ok=True)
-                disc_dir.mkdir(parents=True, exist_ok=True)
-
-                item = {
-                    "model": name,
-                    "site_name": None,
-                    "x": None,
-                    "y": None,
-                    "z": None,
-                    "lat": None,
-                    "lon": None,
-                    "site_building_pct": None,
-                    "building_pct": None,
-                    "storey_pct": None,
-                    "qty": None,
-                    "dir_root": root_dir,
-                    "common": None,
-                    "common_pct": None,
-                    "disc": None,
-                    "disc_pct": None,
-                    "disc_code": None,
-                    "storey_names": [],
-                }
-
-                try:
-                    self.ui_call(self.set_status, f"[{i}/{total}] Открытие IFC: {name}")
-                    model = open_ifc(ifc_path)
-
-                    item.update(get_ifc_site_data(model))
-                    item["qty"] = get_ifc_elements_count(model)
-                    item["storey_names"] = get_ifc_storey_names(model)
-
-                    # ---------- PASS 1: МССК ----------
-                    if common_ids:
-                        try:
-                            self.ui_call(self.set_status, f"[{i}/{total}] МССК: {name}")
-                            common_specs = open_ids(common_ids)
-                            common_specs.validate(model)
-
-                            out_base_common = mssk_dir / ifc_p.stem
-                            html_c, pct_c = emit_reports(
-                                common_specs,
-                                out_base_common,
-                                common_ids,
-                                ifc_path,
-                                remove_empty_ifc_classes=remove_empty_ifc_classes
-                            )
-
-                            self.ui_call(self.log, f"✅ МССК отчёт: {html_c}")
-                            item["common"] = html_c
-                            item["common_pct"] = pct_c
-
-                            if open_after and html_c:
-                                try:
-                                    os.startfile(str(html_c))
-                                except Exception:
-                                    pass
-
-                        except Exception as e:
-                            self.ui_call(self.log, f"❌ МССК ошибка: {name}: {e}")
-                    else:
-                        self.ui_call(self.log, f"🟡 Общая IDS не задана — МССК пропущен: {name}")
-
-                    self.ui_call(self.pb.step, 1)
-
-                    # ---------- PASS 2: дисциплина ----------
-                    rule, _ = match_rule(name, rules, self.cfg.match_mode)
-
-                    if rule:
-                        d_ids = (rule.get("ids_path") or "").strip()
-                        mapping_path = (rule.get("mapping_path") or "").strip()
-
-                        try:
-                            self.ui_call(self.set_status, f"[{i}/{total}] Дисциплина: {name}")
-
-                            d_specs = open_ids(d_ids)
-                            d_specs.validate(model)
-
-                            out_base_disc = disc_dir / ifc_p.stem
-                            html_d, pct_d = emit_reports(
-                                d_specs,
-                                out_base_disc,
-                                d_ids,
-                                ifc_path,
-                                mapping_path=mapping_path,
-                                remove_empty_ifc_classes=remove_empty_ifc_classes
-                            )
-
-                            self.ui_call(self.log, f"✅ Дисциплина: {html_d}")
-
-                            item["disc"] = html_d
-                            item["disc_pct"] = pct_d
-                            item["disc_code"] = ""
-                            item["site_building_pct"] = _ifc_class_percent_from_html(html_d, "IfcSite")
-                            item["building_pct"] = _ifc_class_percent_from_html(html_d, "IfcBuilding")
-                            item["storey_pct"] = _ifc_class_percent_from_html(html_d, "IfcBuildingStorey")
-
-                            if open_after and html_d:
-                                try:
-                                    os.startfile(str(html_d))
-                                except Exception:
-                                    pass
-
-                        except Exception as e:
-                            self.ui_call(self.log, f"❌ Ошибка дисциплины: {name}: {e}")
-                    else:
-                        self.ui_call(self.log, f"🟡 Правило дисциплины не найдено: {name}")
-
-                    self.ui_call(self.pb.step, 1)
-
-                except Exception as e:
-                    self.ui_call(self.log, f"❌ Ошибка обработки IFC: {name}: {e}")
-                    self.ui_call(self.pb.step, 2)
-
-                items.append(item)
-
-            if make_summary and items:
-                try:
-                    root_dir = items[0]["dir_root"]
-                    s_path = summary_path(root_dir)
-
-                    write_summary(
-                        s_path,
-                        items,
-                        project_name=self.profile.name,
-                        section_descriptions=self.profile.section_descriptions
-                    )
-
-                    self.ui_call(self.log, f"🆗 Сводный отчёт: {s_path}")
-
+            common_signature = ids_fingerprint(profile.common_ids_path)
+            signatures = {}
+            rules = [rule.__dict__ for rule in profile.disc_rules]
+            for index, ifc_path in enumerate(ifc_paths):
+                name = Path(ifc_path).name
+                rule, _ = match_rule(name, rules) if profile.discipline_ids_enabled else (None, None)
+                signature = ""
+                if rule:
+                    ids_path = rule["ids_path"].strip()
+                    if ids_path not in signatures:
+                        signatures[ids_path] = ids_fingerprint(ids_path)
+                    signature = signatures[ids_path]
+                    rule = deepcopy(rule)
+                    rule["ids_path"] = str(Path(ids_path).resolve())
+                    mapping = (rule.get("mapping_path") or "").strip()
+                    rule["mapping_path"] = str(Path(mapping).resolve()) if mapping else ""
+                tasks.append({
+                    "index": index, "ifc_path": str(Path(ifc_path).resolve()),
+                    "reports_dir": str(self.get_reports_root_dir(ifc_path, profile).resolve()),
+                    "revit_name": self._get_revit_name_for_ifc(name, profile),
+                    "common_ids": str(Path(profile.common_ids_path).resolve()),
+                    "common_signature": common_signature,
+                    "discipline_enabled": profile.discipline_ids_enabled,
+                    "discipline_rule": deepcopy(rule), "discipline_signature": signature,
+                    "remove_empty_ifc_classes": profile.remove_empty_ifc_classes,
+                })
+            workers = model_worker_count(profile.parallel_workers, total)
+            self.ui_call(self.log, f"Параллельная проверка: {workers} исполнителей · моделей: {total} · доступно CPU: {available_cpu_count()}.")
+            def on_event(event):
+                nonlocal errors
+                index, kind, value = event
+                if kind == "log":
+                    if value.startswith("❌"):
+                        errors = True
+                    self.ui_call(self.log, value)
+                elif kind == "status" and not self.stop_event.is_set():
+                    self.ui_call(self.set_status, f"Готово {len(completed)}/{total} · {value}")
+                elif kind == "report" and open_after:
                     try:
-                        os.startfile(str(s_path))
+                        os.startfile(value)
                     except Exception:
                         pass
-
-                except Exception as e:
-                    self.ui_call(self.log, f"! Не удалось создать сводный отчёт: {e}")
-
-            self.ui_call(self.set_status, "Завершено.")
-
-        except Exception as e:
-            tb = traceback.format_exc(limit=8)
-            self.ui_call(self.log, "Критическая ошибка:\n" + tb)
-            self.ui_call(self.set_status, f"Ошибка: {e}")
-
+            def on_result(index, item):
+                completed[index] = item
+                self.ui_call(self.pb.step, 1)
+                self.ui_call(self.log, f"Модель завершена [{len(completed)}/{total}]: {item['model']} · {item.get('elapsed_seconds', 0):.1f} с.")
+            try:
+                run_model_batch(tasks, profile.parallel_workers, self.stop_event, on_event, on_result)
+            except Exception as error:
+                errors = True
+                self.ui_call(self.log, f"❌ Ошибка параллельной проверки: {error}")
+            items = [completed[index] for index in sorted(completed)]
+            if items:
+                try:
+                    record_check_history(items[0]["dir_root"], items, profile.name, run_id=history_run_id)
+                    self.ui_call(self.log, "Статистика проверок сохранена.")
+                except Exception as error:
+                    errors = True
+                    self.ui_call(self.log, f"❌ Не удалось сохранить статистику: {error}")
+            if profile.create_summary and items:
+                try:
+                    s_path = summary_path(items[0]["dir_root"])
+                    write_summary(s_path, items, project_name=profile.name,
+                        section_descriptions=profile.section_descriptions, record_history=False)
+                    self.ui_call(self.log, f"🆗 Сводный отчёт обновлён по именам IFC: {s_path}")
+                    if not getattr(self, "_close_when_finished", False):
+                        try:
+                            os.startfile(str(s_path))
+                        except Exception:
+                            pass
+                except Exception as error:
+                    errors = True
+                    self.ui_call(self.log, f"❌ Не удалось создать сводный отчёт: {error}")
+            elapsed = time.perf_counter()-started
+            self.ui_call(self.log, f"Общее время: {elapsed:.1f} с. Проверено моделей: {len(items)}/{total}.")
+            status = "Остановлено пользователем." if self.stop_event.is_set() else "Завершено с ошибками." if errors else "Завершено."
+            self.ui_call(self.set_status, status)
+        except Exception as error:
+            self.ui_call(self.log, "Критическая ошибка:\n" + traceback.format_exc(limit=8))
+            self.ui_call(self.set_status, f"Ошибка: {error}")
         finally:
-            self.is_running = False
-            self.ui_call(self.btn_run.config, state="normal")
-            self.ui_call(self.btn_stop.config, state="disabled")
+            self.ui_call(self._finish_run)
 
     def on_close(self):
         try:
-            self.stop_game_process()
             self._collect_ui_to_profile()
             self.cfg.save()
-        except Exception:
-            pass
+        except Exception as error:
+            messagebox.showerror("Не удалось сохранить проект", str(error), parent=self)
+            return
+        self.stop_event.set()
+        self._close_ifc_preview()
+        if self.is_running:
+            self._close_when_finished = True
+            self.on_stop()
+            self.set_status("Завершение текущих проверок и сохранение результатов перед закрытием…")
+            return
+        self.stop_game_process()
         self.destroy()
+
+    def destroy(self):
+        self._app_destroyed = True
+        self._close_ifc_preview()
+        timer = self.__dict__.get("_ui_queue_timer")
+        if timer is not None:
+            self.after_cancel(timer)
+            self._ui_queue_timer = None
+        super().destroy()
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     App().mainloop()

@@ -1,0 +1,497 @@
+# validator.py
+from __future__ import annotations
+import json
+import sys
+import subprocess
+import re
+from pathlib import Path
+from typing import Dict, Tuple, Optional, List
+
+import ifcopenshell
+from ifctester import ids as ids_mod
+
+from ifc_ids_validator.report_postprocess import postprocess_html_report
+
+# reporter может отсутствовать на некоторых сборках
+try:
+    from ifctester import reporter
+    HAVE_REPORTER = True
+except Exception:
+    HAVE_REPORTER = False
+
+# опционально используем bs4, если установлена (pip install beautifulsoup4)
+try:
+    from bs4 import BeautifulSoup  # type: ignore
+    HAVE_BS4 = True
+except Exception:
+    HAVE_BS4 = False
+
+MATCH_CONTAINS = "contains"   # единственный режим — «Содержит»
+
+
+# ----------------------------- matching -----------------------------
+def match_rule(filename: str, rules: List[Dict], mode: str = MATCH_CONTAINS) -> Tuple[Optional[Dict], Optional[str]]:
+    """Подстрочный match без регистра."""
+    name = (filename or "").lower()
+    for r in rules or []:
+        patt = (r.get("pattern") or "").lower()
+        if patt and patt in name:
+            return r, None
+    return None, None
+
+
+# ------------------------------- IO --------------------------------
+def open_ids(path: str):
+    return ids_mod.open(path, validate=True)
+
+
+def open_ifc(path: str):
+    return ifcopenshell.open(path)
+
+
+def _fmt_num(v) -> Optional[str]:
+    if v is None:
+        return None
+    try:
+        f = float(v)
+        if abs(f - round(f)) < 1e-9:
+            return str(int(round(f)))
+        return f"{f:.6f}".rstrip("0").rstrip(".")
+    except Exception:
+        return str(v)
+
+
+def _format_dms(values) -> Optional[str]:
+    """
+    IFC хранит широту/долготу как список:
+    [degrees, minutes, seconds, millionths_of_second]
+    """
+    try:
+        vals = list(values)
+    except Exception:
+        return None
+
+    if not vals:
+        return None
+
+    try:
+        deg = vals[0] if len(vals) > 0 else 0
+        minute = vals[1] if len(vals) > 1 else 0
+        second = vals[2] if len(vals) > 2 else 0
+        frac = vals[3] if len(vals) > 3 else 0
+
+        sec_total = float(second)
+        if frac:
+            sec_total += float(frac) / 1_000_000.0
+
+        return f"{deg}° {minute}' {sec_total:.3f}\""
+    except Exception:
+        try:
+            return ".".join(map(str, vals))
+        except Exception:
+            return None
+
+
+def _get_map_conversion(model):
+    """
+    Возвращает первый IfcMapConversion, если он есть.
+    """
+    try:
+        conversions = model.by_type("IfcMapConversion")
+        if conversions:
+            return conversions[0]
+    except Exception:
+        pass
+    return None
+
+def get_ifc_elements_count(model) -> str:
+    """
+    Возвращает количество физических элементов в IFC-модели.
+    Считаем IfcElement — стены, перекрытия, двери, окна, инженерные элементы и т.п.
+    """
+    try:
+        return str(len(model.by_type("IfcElement")))
+    except Exception:
+        return "—"
+    
+def get_ifc_storey_names(model) -> list[str]:
+    """
+    Возвращает список уровней IfcBuildingStorey.
+
+    Для каждого уровня выводятся:
+    - Name;
+    - LongName;
+    - Elevation — отметка уровня.
+
+    Пример:
+    1_этаж_основной / Первый этаж — отметка: +0.000
+    """
+
+    result: list[str] = []
+
+    try:
+        storeys = model.by_type("IfcBuildingStorey")
+    except Exception:
+        return result
+
+    for storey in storeys:
+        try:
+            name_value = getattr(storey, "Name", None)
+            long_name_value = getattr(storey, "LongName", None)
+            elevation_value = getattr(storey, "Elevation", None)
+
+            name = str(name_value).strip() if name_value else ""
+            long_name = str(long_name_value).strip() if long_name_value else ""
+
+            # Формируем основное название уровня
+            if name and long_name and name != long_name:
+                level_title = f"{name} / {long_name}"
+            elif name:
+                level_title = name
+            elif long_name:
+                level_title = long_name
+            else:
+                level_title = "Уровень без имени"
+
+            # Формируем отметку уровня
+            if elevation_value is not None:
+                try:
+                    elevation_number = float(elevation_value)
+                    elevation_text = f"{elevation_number:+.3f}"
+                except (TypeError, ValueError):
+                    elevation_text = str(elevation_value).strip() or "не задана"
+            else:
+                elevation_text = "не задана"
+
+            result.append(
+                f"{level_title} — отметка: {elevation_text}"
+            )
+
+        except Exception:
+            continue
+
+    return result
+
+def get_ifc_site_data(model) -> Dict[str, Optional[str]]:
+    """
+    Возвращает данные площадки:
+    - site_name
+    - x, y, z
+    - lat, lon
+
+    Global X/Y/Z:
+    1. в первую очередь IfcMapConversion (Eastings/Northings/OrthogonalHeight)
+    2. если его нет — из IfcSite.ObjectPlacement.RelativePlacement.Location
+    """
+    result = {
+        "site_name": None,
+        "x": None,
+        "y": None,
+        "z": None,
+        "lat": None,
+        "lon": None,
+    }
+
+    # ---- IfcMapConversion ----
+    map_conv = _get_map_conversion(model)
+    if map_conv is not None:
+        try:
+            result["x"] = _fmt_num(getattr(map_conv, "Eastings", None))
+        except Exception:
+            pass
+        try:
+            result["y"] = _fmt_num(getattr(map_conv, "Northings", None))
+        except Exception:
+            pass
+        try:
+            result["z"] = _fmt_num(getattr(map_conv, "OrthogonalHeight", None))
+        except Exception:
+            pass
+
+    # ---- IfcSite ----
+    try:
+        sites = model.by_type("IfcSite")
+    except Exception:
+        sites = []
+
+    if not sites:
+        return result
+
+    site = sites[0]
+
+    # ---- имя ----
+    try:
+        long_name = getattr(site, "LongName", None)
+        if long_name:
+            result["site_name"] = str(long_name).strip()
+        else:
+            name = getattr(site, "Name", None)
+            if name:
+                result["site_name"] = str(name).strip()
+    except Exception:
+        pass
+
+    # ---- координаты из placement, если MapConversion не дал значений ----
+    if result["x"] is None or result["y"] is None or result["z"] is None:
+        try:
+            placement = site.ObjectPlacement
+            if placement and placement.RelativePlacement and placement.RelativePlacement.Location:
+                coords = getattr(placement.RelativePlacement.Location, "Coordinates", None)
+                if coords:
+                    if result["x"] is None and len(coords) > 0:
+                        result["x"] = _fmt_num(coords[0])
+                    if result["y"] is None and len(coords) > 1:
+                        result["y"] = _fmt_num(coords[1])
+                    if result["z"] is None and len(coords) > 2:
+                        result["z"] = _fmt_num(coords[2])
+        except Exception:
+            pass
+
+    # ---- география ----
+    try:
+        ref_lat = getattr(site, "RefLatitude", None)
+        if ref_lat:
+            result["lat"] = _format_dms(ref_lat)
+    except Exception:
+        pass
+
+    try:
+        ref_lon = getattr(site, "RefLongitude", None)
+        if ref_lon:
+            result["lon"] = _format_dms(ref_lon)
+    except Exception:
+        pass
+
+    return result
+
+
+# ---------------------- percent from HTML (Summary) -----------------
+_percent_num_re = re.compile(r'(\d{1,3})\s*%')
+_percent_style_re = re.compile(r'width\s*:\s*(\d{1,3})\s*%')
+_requirements_re = re.compile(
+    r'Requirements\s+passed\s*:\s*<strong>\s*(\d+)\s*</strong>\s*/\s*<strong>\s*(\d+)\s*</strong>',
+    flags=re.IGNORECASE | re.DOTALL
+)
+
+def _percent_from_html(html_path: Path) -> Optional[float]:
+    """
+    Извлекает процент из блока Summary отчёта IfcTester.
+    Возвращает число [0..100] или None.
+    Работает без зависимостей (regex); если есть bs4 — используем её для надёжности.
+    """
+    try:
+        text = html_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+
+    if HAVE_BS4:
+        try:
+            soup = BeautifulSoup(text, "html.parser")
+            h2 = soup.find(lambda tag: tag.name in ("h2", "h3") and tag.get_text(strip=True).lower() == "summary")
+            container = h2.find_next("div") if h2 else soup
+            percent_div = container.find("div", class_=lambda c: c and "percent" in c) if container else None
+            if percent_div:
+                m = _percent_num_re.search(percent_div.get_text(" ", strip=True))
+                if m:
+                    return float(m.group(1))
+                style = percent_div.get("style", "")
+                m2 = _percent_style_re.search(style)
+                if m2:
+                    return float(m2.group(1))
+        except Exception:
+            pass
+
+    idx = text.lower().find("summary")
+    sniff = text[idx: idx + 5000] if idx != -1 else text
+
+    m = re.search(
+        r'<div[^>]*class="[^"]*\bpercent\b[^"]*"[^>]*>(.*?)</div>',
+        sniff,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    if m:
+        inner = m.group(1)
+        mnum = _percent_num_re.search(inner)
+        if mnum:
+            return float(mnum.group(1))
+        mstyle = _percent_style_re.search(m.group(0))
+        if mstyle:
+            return float(mstyle.group(1))
+
+    m_all = re.search(
+        r'<div[^>]*class="[^"]*\bpercent\b[^"]*"[^>]*>(.*?)</div>',
+        text,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    if m_all:
+        inner = m_all.group(1)
+        mnum = _percent_num_re.search(inner)
+        if mnum:
+            return float(mnum.group(1))
+        mstyle = _percent_style_re.search(m_all.group(0))
+        if mstyle:
+            return float(mstyle.group(1))
+
+    return None
+
+def _ifc_class_percent_from_html(html_path: Path, ifc_class: str) -> Optional[str]:
+    """
+    Ищет в HTML блок спецификации, где в Applicability есть:
+    All IfcBuilding data / All IfcSite data / All IfcBuildingStorey data
+
+    Возвращает процент из этого блока, например '100%'.
+    """
+    try:
+        text = html_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+
+    target = f"All {ifc_class} data".lower()
+
+    if HAVE_BS4:
+        try:
+            soup = BeautifulSoup(text, "html.parser")
+
+            sections = soup.find_all("section", class_=lambda c: c and "specification" in c)
+
+            for section in sections:
+                section_text = section.get_text(" ", strip=True).lower()
+
+                if target not in section_text:
+                    continue
+
+                percent_div = section.find("div", class_=lambda c: c and "percent" in c)
+                if percent_div:
+                    percent_text = percent_div.get_text(" ", strip=True)
+                    m = _percent_num_re.search(percent_text)
+                    if m:
+                        return f"{m.group(1)}%"
+
+            return None
+        except Exception:
+            pass
+
+    # fallback без BeautifulSoup
+    section_iter = re.finditer(
+        r'<section[^>]*class="[^"]*\bspecification\b[^"]*"[^>]*>',
+        text,
+        flags=re.IGNORECASE
+    )
+
+    starts = [m.start() for m in section_iter]
+    starts.append(len(text))
+
+    for i in range(len(starts) - 1):
+        fragment = text[starts[i]:starts[i + 1]]
+
+        plain = re.sub(r"<.*?>", " ", fragment)
+        plain = re.sub(r"\s+", " ", plain).strip().lower()
+
+        if target not in plain:
+            continue
+
+        percent_match = re.search(
+            r'<div[^>]*class="[^"]*\bpercent\b[^"]*"[^>]*>\s*(\d{1,3})\s*%\s*</div>',
+            fragment,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+
+        if percent_match:
+            return f"{percent_match.group(1)}%"
+
+    return None
+
+
+# ---------------------------- CLI helper ----------------------------
+def _run_ifctester_cli(ids_path: str, ifc_path: str, report: str, out_dir: Path) -> None:
+    if getattr(sys, "frozen", False):
+        raise RuntimeError(
+            "CLI-запуск ifctester отключён в exe-сборке. "
+            "Используется только встроенный reporter ifctester."
+        )
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    args = [sys.executable, "-m", "ifctester", ids_path, ifc_path, "-r", report]
+
+    completed = subprocess.run(
+        args,
+        cwd=str(out_dir),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8"
+    )
+
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"ifctester {report} failed (code {completed.returncode}).\n{completed.stdout}"
+        )
+
+
+# ----------------------------- reports ------------------------------
+def emit_reports(
+    specs,
+    out_base: Path,
+    ids_path: str,
+    ifc_path: str,
+    mapping_path: str | None = None,
+    remove_empty_ifc_classes: bool = False,
+) -> Tuple[Path, Optional[float]]:
+    """
+    Генерирует HTML-отчёт для переданных specs.
+    out_base: базовый путь без расширения.
+    mapping_path: путь к txt-файлу сопоставления параметров.
+    """
+    out_base = Path(out_base)
+    out_dir = out_base.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    target_html = out_base.with_name(out_base.name + ".html")
+
+    try:
+        if target_html.exists():
+            target_html.unlink()
+    except Exception:
+        pass
+
+    html_ok = False
+
+    if HAVE_REPORTER:
+        try:
+            h = reporter.Html(specs)
+            h.report()
+            h.to_file(str(target_html))
+            html_ok = target_html.exists()
+        except Exception:
+            html_ok = False
+
+    if not html_ok:
+        try:
+            stem = Path(ifc_path).stem
+            tmp_html = out_dir / f"{stem}.html"
+
+            if tmp_html.exists():
+                tmp_html.unlink()
+
+            _run_ifctester_cli(ids_path, ifc_path, "Html", out_dir)
+
+            if tmp_html.exists():
+                tmp_html.replace(target_html)
+                html_ok = target_html.exists()
+        except Exception:
+            html_ok = False
+
+    if html_ok and target_html.exists():
+        try:
+            postprocess_html_report(
+                target_html,
+                mapping_path=mapping_path,
+                remove_empty_ifc_classes=remove_empty_ifc_classes,
+                validation_specs=specs,
+            )
+        except Exception as e:
+            print(f"[POSTPROCESS ERROR] {target_html}: {e}")
+
+    percent = _percent_from_html(target_html) if html_ok else None
+    return target_html, percent

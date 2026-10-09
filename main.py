@@ -1,9 +1,6 @@
 ﻿# main.py
 import sys
-import tkinter as tk
-from tkinter import messagebox
-
-from ifc_ids_validator.ui_main import App
+import multiprocessing
 
 
 def main():
@@ -11,6 +8,10 @@ def main():
         from ifc_ids_validator.game import Game
         Game().run()
         return
+
+    import tkinter as tk
+    from tkinter import messagebox
+    from ifc_ids_validator.ui_main import App
 
     try:
         App().mainloop()
@@ -22,4 +23,5 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()

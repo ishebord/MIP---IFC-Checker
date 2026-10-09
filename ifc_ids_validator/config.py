@@ -2,6 +2,8 @@
 from __future__ import annotations
 import json
 import os
+import tempfile
+import shutil
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -121,36 +123,82 @@ class Profile:
     reports_dir: str = ""
     common_ids_path: str = ""
     disc_rules: List[DisciplineRule] = field(default_factory=list)
+    discipline_ids_enabled: bool = False
     create_summary: bool = True
     remove_empty_ifc_classes: bool = False
     run_game: bool = True
+    parallel_workers: int = 0  # 0: use all available CPU cores, capped by model count
+    ifc_revit_names: List[List[str]] = field(default_factory=list)
     rules_mode: str = "Приказ 64"
-    section_descriptions: List[List[str]] = field(default_factory=list)    
+    section_descriptions: List[List[str]] = field(default_factory=lambda: get_default_sections("Приказ 178"))
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "Profile":
+        # Only legacy profiles without embedded IDS settings read the old global file.
+        # Empty paths/rules in a new profile are intentional and must stay empty.
+        mode = d.get("rules_mode", "Приказ 64")
+        local_ids = any(key in d for key in (
+            "common_ids_path", "disc_rules", "discipline_ids_enabled"
+        ))
+        legacy = {} if local_ids else load_rules(mode)
+        raw_rules = d.get("disc_rules", legacy.get("disc_rules", [])) or []
+        rules = []
+        for r in raw_rules:
+            if isinstance(r, DisciplineRule):
+                rules.append(DisciplineRule(**asdict(r)))
+            elif isinstance(r, dict):
+                rules.append(DisciplineRule(
+                    pattern=str(r.get("pattern") or ""),
+                    ids_path=str(r.get("ids_path") or ""),
+                    mapping_path=str(r.get("mapping_path") or ""),
+                ))
+        sections = d.get("section_descriptions", legacy.get(
+            "section_descriptions", get_default_sections(mode)
+        )) or []
         return Profile(
             name=d.get("name", "Project"),
             last_ifc_dir=d.get("last_ifc_dir", ""),
             ifc_paths=list(d.get("ifc_paths", [])),
             reports_dir=d.get("reports_dir", ""),
-            common_ids_path="",
-            disc_rules=[],
+            common_ids_path=str(d.get("common_ids_path", legacy.get("common_ids_path", "")) or ""),
+            disc_rules=rules,
+            discipline_ids_enabled=bool(d.get("discipline_ids_enabled", bool(rules))),
             create_summary=bool(d.get("create_summary", True)),
             remove_empty_ifc_classes=bool(d.get("remove_empty_ifc_classes", False)),
             run_game=bool(d.get("run_game", True)),
-            rules_mode=d.get("rules_mode", "Приказ 64"),
-            section_descriptions=[],
+            parallel_workers=max(0, int(d.get("parallel_workers", 0) or 0)),
+            ifc_revit_names=[
+                [str(row[0]), str(row[1])]
+                for row in d.get("ifc_revit_names", [])
+                if isinstance(row, (list, tuple)) and len(row) >= 2
+            ],
+            rules_mode=mode,  # legacy migration metadata, no longer a UI mode
+            section_descriptions=[
+                [str(row[0]), str(row[1])]
+                for row in sections
+                if isinstance(row, (list, tuple)) and len(row) >= 2
+            ],
         )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "name": self.name,
             "last_ifc_dir": self.last_ifc_dir,
             "ifc_paths": list(self.ifc_paths),
             "reports_dir": self.reports_dir,
+            "common_ids_path": self.common_ids_path,
+            "disc_rules": [asdict(r) for r in self.disc_rules],
+            "discipline_ids_enabled": bool(self.discipline_ids_enabled),
+            "section_descriptions": [row[:] for row in self.section_descriptions],
             "create_summary": bool(self.create_summary),
             "remove_empty_ifc_classes": bool(self.remove_empty_ifc_classes),
             "run_game": bool(self.run_game),
+            "parallel_workers": max(0, int(self.parallel_workers)),
+            "ifc_revit_names": [
+                [str(row[0]), str(row[1])]
+                for row in self.ifc_revit_names
+                if isinstance(row, (list, tuple)) and len(row) >= 2
+            ],
             "rules_mode": self.rules_mode,
         }
 
@@ -203,28 +251,6 @@ def load_rules(mode: str) -> Dict[str, Any]:
     }
 
 
-def save_rules(
-    mode: str,
-    common_ids_path: str,
-    rules: List[DisciplineRule],
-    section_descriptions: List[List[str]] | None = None
-) -> None:
-    rules_path = get_rules_path(mode)
-
-    try:
-        CONF_DIR.mkdir(parents=True, exist_ok=True)
-        data = {
-            "common_ids_path": common_ids_path or "",
-            "disc_rules": [asdict(r) for r in rules],
-            "section_descriptions": section_descriptions if section_descriptions is not None else get_default_sections(mode),
-        }
-        rules_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
-    except Exception:
-        pass
-
 
 @dataclass
 class AppConfig:
@@ -235,65 +261,55 @@ class AppConfig:
     @staticmethod
     def default() -> "AppConfig":
         p = Profile(name="Project 1")
-        rules_data = load_rules(p.rules_mode)
-        p.common_ids_path = rules_data.get("common_ids_path", "")
-        p.disc_rules = [DisciplineRule(**asdict(r)) for r in rules_data.get("disc_rules", [])]
-        p.section_descriptions = [row[:] for row in rules_data.get("section_descriptions", get_default_sections(p.rules_mode))]
         return AppConfig(profiles={p.name: p}, active=p.name)
 
     @staticmethod
     def load() -> "AppConfig":
-        try:
-            if CONF_PATH.exists():
-                raw = json.loads(CONF_PATH.read_text(encoding="utf-8"))
-                active = raw.get("active")
-                profiles_raw = raw.get("profiles", {})
-
-                profiles = {
-                    name: Profile.from_dict({**v, "name": name})
-                    for name, v in profiles_raw.items()
-                    if isinstance(v, dict)
-                }
-
-                if not profiles:
-                    return AppConfig.default()
-
-                for p in profiles.values():
-                    rules_data = load_rules(p.rules_mode)
-                    p.common_ids_path = rules_data.get("common_ids_path", "")
-                    p.disc_rules = [DisciplineRule(**asdict(r)) for r in rules_data.get("disc_rules", [])]
-                    p.section_descriptions = [row[:] for row in rules_data.get("section_descriptions", get_default_sections(p.rules_mode))]
-
-                if not active or active not in profiles:
-                    active = next(iter(profiles))
-
-                return AppConfig(
-                    profiles=profiles,
-                    active=active,
-                    match_mode=raw.get("match_mode", "contains"),
-                )
-        except Exception:
-            pass
-
-        return AppConfig.default()
+        if not CONF_PATH.exists():
+            return AppConfig.default()
+        # A broken file must not silently reset all projects.
+        raw = json.loads(CONF_PATH.read_text(encoding="utf-8-sig"))
+        profiles_raw = raw.get("profiles", {})
+        profiles = {
+            name: Profile.from_dict({**value, "name": name})
+            for name, value in profiles_raw.items()
+            if isinstance(value, dict)
+        }
+        if not profiles:
+            return AppConfig.default()
+        active = raw.get("active")
+        if active not in profiles:
+            active = next(iter(profiles))
+        cfg = AppConfig(profiles=profiles, active=active, match_mode="contains")
+        if raw.get("schema_version", 1) < 2:
+            backup = CONF_PATH.with_name("config.before_project_ids.json")
+            if not backup.exists():
+                shutil.copy2(CONF_PATH, backup)
+            cfg.save()
+        return cfg
 
     def save(self) -> None:
+        CONF_DIR.mkdir(parents=True, exist_ok=True)
+        data = {
+            "schema_version": 2,
+            "active": self.active,
+            "match_mode": "contains",
+            "profiles": {name: p.to_dict() for name, p in self.profiles.items()},
+        }
+        temp_path = None
         try:
-            CONF_DIR.mkdir(parents=True, exist_ok=True)
-
-            data = {
-                "active": self.active,
-                "match_mode": "contains",
-                "profiles": {name: p.to_dict() for name, p in self.profiles.items()},
-            }
-
-            CONF_PATH.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8"
-            )
-
-        except Exception:
-            pass
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=CONF_DIR,
+                prefix="config_", suffix=".tmp", delete=False
+            ) as stream:
+                temp_path = Path(stream.name)
+                json.dump(data, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp_path, CONF_PATH)
+        finally:
+            if temp_path is not None and temp_path.exists():
+                temp_path.unlink()
 
     # ---- profile helpers ----
     def get_active(self) -> Profile:
@@ -302,6 +318,25 @@ class AppConfig:
     def set_active(self, name: str) -> None:
         if name in self.profiles:
             self.active = name
+
+    def copy_project_ids(self, source_name: str, target_name: str) -> None:
+        """Copy only IDS settings, preserving project data and rule independence."""
+        if source_name == target_name:
+            raise ValueError("Выберите другой проект для копирования IDS.")
+        if source_name not in self.profiles or target_name not in self.profiles:
+            raise ValueError("Проект для копирования IDS не найден.")
+        source = self.profiles[source_name]
+        target = self.profiles[target_name]
+        rules = [DisciplineRule(**asdict(rule)) for rule in source.disc_rules]
+        previous = (target.common_ids_path, target.discipline_ids_enabled, target.disc_rules)
+        target.common_ids_path = source.common_ids_path
+        target.discipline_ids_enabled = source.discipline_ids_enabled
+        target.disc_rules = rules
+        try:
+            self.save()
+        except Exception:
+            target.common_ids_path, target.discipline_ids_enabled, target.disc_rules = previous
+            raise
 
     def create_profile(self, name: str) -> Profile:
         if name in self.profiles:
@@ -312,12 +347,6 @@ class AppConfig:
             name = f"{base} {i}"
 
         p = Profile(name=name)
-        rules_data = load_rules(p.rules_mode)
-        p.common_ids_path = rules_data.get("common_ids_path", "")
-        p.disc_rules = [
-            DisciplineRule(**asdict(r)) for r in rules_data.get("disc_rules", [])
-        ]
-        p.section_descriptions = [row[:] for row in rules_data.get("section_descriptions", get_default_sections(p.rules_mode))]
         self.profiles[name] = p
         self.active = name
         return p
@@ -379,12 +408,6 @@ class AppConfig:
             i += 1
 
         p.name = final_name
-        rules_data = load_rules(p.rules_mode)
-        p.common_ids_path = rules_data.get("common_ids_path", "")
-        p.disc_rules = [
-            DisciplineRule(**asdict(r)) for r in rules_data.get("disc_rules", [])
-        ]
-        p.section_descriptions = [row[:] for row in rules_data.get("section_descriptions", get_default_sections(p.rules_mode))]
         self.profiles[p.name] = p
         self.active = p.name
         return p

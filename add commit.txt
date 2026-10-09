@@ -1,3 +1,3 @@
 git add .
-git commit -m "Исправлено дубрлирование + Тетрис"
+git commit -m "По сути новый документ"
 git push

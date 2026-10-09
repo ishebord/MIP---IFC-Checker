@@ -1,6 +1,7 @@
 # report_postprocess.py
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -192,11 +193,189 @@ def translate_summary_text(text: str, mapping: dict[str, str]) -> str:
     return f"Параметр {result}".strip()
 
 
+def _unique_tags(values):
+    """Use IFC Tag only; never substitute STEP ids, names or GlobalId."""
+    tags, seen = [], set()
+    missing = 0
+    for value in values:
+        text = str(value).strip() if value is not None else ""
+        if not text or text.casefold() in {"none", "null", "n/a", "$", "—", "-"}:
+            missing += 1
+            continue
+        if text not in seen:
+            seen.add(text)
+            tags.append(text)
+    return tags, missing
+
+
+def _tags_from_requirement(requirement):
+    failures = getattr(requirement, "failures", None)
+    if failures is None:
+        return None
+    values = []
+    for failure in failures:
+        element = failure.get("element") if isinstance(failure, dict) else getattr(failure, "element", None)
+        values.append(getattr(element, "Tag", None) if element is not None else None)
+    tags, missing = _unique_tags(values)
+    return {"tags": tags, "missing": missing, "complete": True}
+
+
+def _tags_from_tables(details):
+    values = []
+    complete = True
+    for table in details.select("table.fail"):
+        headers = [cell.get_text(" ", strip=True).casefold() for cell in table.select("thead th")]
+        if "tag" not in headers:
+            continue
+        column = headers.index("tag")
+        body = table.find("tbody") or table
+        for row in body.find_all("tr", recursive=False):
+            cells = row.find_all("td", recursive=False)
+            if any(int(cell.get("colspan", 1)) > 1 for cell in cells):
+                complete = False
+                continue
+            if len(cells) > column:
+                values.append(cells[column].get_text(" ", strip=True))
+    tags, missing = _unique_tags(values)
+    return {"tags": tags, "missing": missing, "complete": complete}
+
+
+def _add_copy_tag_controls(soup, validation_specs=None):
+    specifications = list(getattr(validation_specs, "specifications", []) or [])
+    for spec_index, section in enumerate(soup.select("section.specification")):
+        spec = specifications[spec_index] if spec_index < len(specifications) else None
+        heading = section.find("h2")
+        # Check the specification name as well as its position before using model data.
+        if spec is not None and (heading is None or re.sub(r"^\d+[.)]\s*", "", heading.get_text(" ", strip=True)) != str(spec.name).strip()):
+            spec = None
+        rules = list(getattr(spec, "requirements", []) or [])
+        results = section.find("div", class_="results")
+        requirements = results.find("ol", recursive=False) if results else None
+        if requirements is None:
+            continue
+        for rule_index, item in enumerate(requirements.find_all("li", recursive=False)):
+            details = item.find("details", recursive=False)
+            if details is None or "fail" not in item.get("class", []):
+                continue
+            summary = details.find("summary", recursive=False)
+            if summary is None:
+                continue
+            data = _tags_from_requirement(rules[rule_index]) if rule_index < len(rules) else None
+            if data is None:
+                # Retain complete embedded lists when reprocessing an existing report.
+                try:
+                    data = json.loads(details.get("data-ifc-failed-tags", "null"))
+                except (ValueError, TypeError):
+                    data = None
+            if not isinstance(data, dict) or not isinstance(data.get("tags"), list):
+                data = _tags_from_tables(details)
+            details["data-ifc-failed-tags"] = json.dumps(data, ensure_ascii=False)
+            classes = list(summary.get("class", []))
+            if "ifc-copy-summary" not in classes:
+                classes.append("ifc-copy-summary")
+            summary["class"] = classes
+            label = soup.new_tag("span", attrs={"class": "ifc-copy-label"})
+            for child in list(summary.contents):
+                label.append(child.extract())
+            summary.append(label)
+            actions = soup.new_tag("span", attrs={"class": "ifc-copy-actions"})
+            button = soup.new_tag("button", attrs={"type": "button", "class": "ifc-copy-tags"})
+            count = len(data["tags"])
+            button.string = f"Копировать ID ({count})" if count else "Нет Tag для копирования"
+            if not data.get("complete"):
+                button.string = f"Копировать ID ({count}, видимые)" if count else "Нет Tag для копирования"
+            button["title"] = "Скопировать Tag элементов этой проверки через ;, без повторов."
+            if not count:
+                button["disabled"] = ""
+            note = "Часть элементов скрыта" if not data.get("complete") else ""
+            if data.get("missing"):
+                note += (" · " if note else "") + f"Без Tag: {data['missing']}"
+            status = soup.new_tag("span", attrs={"class": "ifc-copy-status", "role": "status", "aria-live": "polite"})
+            status.string = note
+            status["data-idle-text"] = note
+            actions.extend([button, status])
+            summary.append(actions)
+    if not soup.select(".ifc-copy-tags"):
+        return
+    head = soup.head
+    if head is None:
+        head = soup.new_tag("head")
+        soup.insert(0, head)
+    for identifier in ("ifc-copy-tags-style", "ifc-copy-tags-script"):
+        previous = soup.find(id=identifier)
+        if previous:
+            previous.decompose()
+    style = soup.new_tag("style", id="ifc-copy-tags-style")
+    style.string = _COPY_TAGS_CSS
+    head.append(style)
+    script = soup.new_tag("script", id="ifc-copy-tags-script")
+    script.string = _COPY_TAGS_JS
+    (soup.body or soup).append(script)
+
+
+_COPY_TAGS_CSS = r'''
+.ifc-copy-summary{display:flex;flex-wrap:wrap;align-items:flex-start;gap:10px}
+.ifc-copy-label{flex:1 1 280px;min-width:0;overflow-wrap:anywhere}
+.ifc-copy-actions{display:flex;flex-direction:column;align-items:flex-start;gap:4px;flex:0 1 auto}
+.ifc-copy-tags{font:600 12px Arial,sans-serif;line-height:1.4;padding:8px 11px;border:1px solid #aec3e8;border-radius:7px;background:#fff;color:#194fa6;cursor:pointer;white-space:nowrap}
+.ifc-copy-tags:hover{background:#edf4ff;border-color:#608cd1}
+.ifc-copy-tags:focus-visible{outline:3px solid #548ade;outline-offset:2px}
+.ifc-copy-tags:disabled{color:#707781;border-color:#bbb;background:#eee;cursor:default}
+.ifc-copy-status{font:11px Arial,sans-serif;line-height:1.5;color:#4b5563;max-width:260px}
+.ifc-copy-fallback{padding:12px;margin:10px 0;background:#fff;border:1px solid #b7c8e3;border-radius:8px;color:#172a43;font:13px Arial,sans-serif}
+.ifc-copy-fallback textarea{display:block;width:100%;min-height:80px;margin:8px 0;font:13px Consolas,monospace;color:#172a43}
+@media print{.ifc-copy-actions,.ifc-copy-fallback{display:none}}
+'''
+
+
+_COPY_TAGS_JS = r'''
+(() => {
+ 'use strict';
+ function legacyCopy(text){
+  const previous=document.activeElement,scrollX=window.scrollX,scrollY=window.scrollY;
+  const input=document.createElement('textarea');input.value=text;input.readOnly=true;
+  input.style.cssText='position:fixed;left:0;top:0;width:1px;height:1px;opacity:0';
+  document.body.append(input);input.focus();input.select();input.setSelectionRange(0,text.length);
+  let copied=false;
+  try{copied=typeof document.execCommand==='function'&&document.execCommand('copy');}catch(error){}
+  input.remove();if(previous&&previous.focus)previous.focus({preventScroll:true});window.scrollTo(scrollX,scrollY);
+  return copied;
+ }
+ function manualCopy(details,text){
+  let box=details.querySelector('.ifc-copy-fallback');if(box)box.remove();
+  box=document.createElement('div');box.className='ifc-copy-fallback';
+  const caption=document.createElement('p');caption.textContent='Браузер не разрешил автоматическое копирование. Список выделен: нажмите Ctrl+C (⌘C на Mac).';
+  const input=document.createElement('textarea');input.value=text;input.readOnly=true;input.setAttribute('aria-label','Tag элементов через точку с запятой');
+  const close=document.createElement('button');close.type='button';close.className='ifc-copy-tags';close.textContent='Закрыть';close.addEventListener('click',()=>box.remove());
+  box.append(caption,input,close);details.append(box);details.open=true;input.focus();input.select();
+ }
+ document.addEventListener('click',async event=>{
+  const button=event.target.closest('button.ifc-copy-tags');
+  if(!button||!button.closest('summary')||button.disabled)return;
+  event.preventDefault();event.stopPropagation();
+  const details=button.closest('details'),status=button.parentElement.querySelector('.ifc-copy-status');
+  let data;
+  try{data=JSON.parse(details.getAttribute('data-ifc-failed-tags'));}catch(error){status.textContent='Не удалось прочитать список Tag.';return;}
+  if(!data||!Array.isArray(data.tags)||!data.tags.length)return;
+  const text=data.tags.join(';');let copied=false;
+  // Synchronous fallback keeps the user gesture when opening an offline HTML file.
+  if(navigator.clipboard&&typeof navigator.clipboard.writeText==='function'&&window.isSecureContext!==false){
+   try{await navigator.clipboard.writeText(text);copied=true;}catch(error){}
+  }
+  if(!copied)copied=legacyCopy(text);
+  status.textContent=copied?'Скопировано ID: '+data.tags.length:'Скопируйте список вручную.';
+  if(!copied)manualCopy(details,text);
+ });
+})();
+'''
+
+
 def postprocess_html_report(
     html_path: str | Path,
     output_path: str | Path | None = None,
     mapping_path: str | Path | None = None,
     remove_empty_ifc_classes: bool = False,
+    validation_specs=None,
 ) -> Path:
     html_path = Path(html_path)
     output_path = Path(output_path) if output_path else html_path
@@ -206,10 +385,11 @@ def postprocess_html_report(
     html = html_path.read_text(encoding="utf-8", errors="ignore")
     soup = BeautifulSoup(html, "html.parser")
     
-    if remove_empty_ifc_classes:
-        for section in soup.find_all("section", class_=lambda c: c and "specification" in c and "is-skipped" in c):
-            section.decompose()
-
+    # Remove only our controls before translating, so a second pass is idempotent.
+    for actions in soup.select("summary .ifc-copy-actions"):
+        actions.decompose()
+    for label in soup.select("summary .ifc-copy-label"):
+        label.unwrap()
     for summary in soup.find_all("summary"):
         old_text = summary.get_text(" ", strip=True)
         new_text = translate_summary_text(old_text, mapping)
@@ -217,6 +397,11 @@ def postprocess_html_report(
         if new_text != old_text:
             summary.clear()
             summary.append(new_text)
+
+    _add_copy_tag_controls(soup, validation_specs)
+    if remove_empty_ifc_classes:
+        for section in soup.select("section.specification.is-skipped"):
+            section.decompose()
 
     output_path.write_text(str(soup), encoding="utf-8")
     return output_path

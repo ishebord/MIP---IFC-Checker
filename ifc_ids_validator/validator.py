@@ -4,6 +4,14 @@ import json
 import sys
 import subprocess
 import re
+import os
+import multiprocessing
+import queue
+import time
+import threading
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Tuple, Optional, List
 
@@ -115,7 +123,19 @@ def get_ifc_elements_count(model) -> str:
         return "—"
     
 def get_ifc_storey_names(model) -> list[str]:
-    result = []
+    """
+    Возвращает список уровней IfcBuildingStorey.
+
+    Для каждого уровня выводятся:
+    - Name;
+    - LongName;
+    - Elevation — отметка уровня.
+
+    Пример:
+    1_этаж_основной / Первый этаж — отметка: +0.000
+    """
+
+    result: list[str] = []
 
     try:
         storeys = model.by_type("IfcBuildingStorey")
@@ -124,21 +144,39 @@ def get_ifc_storey_names(model) -> list[str]:
 
     for storey in storeys:
         try:
-            name = getattr(storey, "Name", None)
-            long_name = getattr(storey, "LongName", None)
+            name_value = getattr(storey, "Name", None)
+            long_name_value = getattr(storey, "LongName", None)
+            elevation_value = getattr(storey, "Elevation", None)
 
-            name = str(name).strip() if name else ""
-            long_name = str(long_name).strip() if long_name else ""
+            name = str(name_value).strip() if name_value else ""
+            long_name = str(long_name_value).strip() if long_name_value else ""
 
+            # Формируем основное название уровня
             if name and long_name and name != long_name:
-                result.append(f"{name} / {long_name}")
+                level_title = f"{name} / {long_name}"
             elif name:
-                result.append(name)
+                level_title = name
             elif long_name:
-                result.append(long_name)
+                level_title = long_name
+            else:
+                level_title = "Уровень без имени"
+
+            # Формируем отметку уровня
+            if elevation_value is not None:
+                try:
+                    elevation_number = float(elevation_value)
+                    elevation_text = f"{elevation_number:+.3f}"
+                except (TypeError, ValueError):
+                    elevation_text = str(elevation_value).strip() or "не задана"
+            else:
+                elevation_text = "не задана"
+
+            result.append(
+                f"{level_title} — отметка: {elevation_text}"
+            )
 
         except Exception:
-            pass
+            continue
 
     return result
 
@@ -372,8 +410,31 @@ def _ifc_class_percent_from_html(html_path: Path, ifc_class: str) -> Optional[st
     return None
 
 
+def ifc_class_percentages_from_html(html_path: Path):
+    """Read and parse a report once for all three spatial IFC metrics."""
+    classes = {"site_building_pct": "IfcSite", "building_pct": "IfcBuilding", "storey_pct": "IfcBuildingStorey"}
+    values = {key: None for key in classes}
+    try:
+        text = Path(html_path).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return values
+    if HAVE_BS4:
+        soup = BeautifulSoup(text, "html.parser")
+        for section in soup.select("section.specification"):
+            plain = section.get_text(" ", strip=True).lower()
+            percent = section.select_one("div.percent")
+            match = _percent_num_re.search(percent.get_text(" ", strip=True)) if percent else None
+            if match:
+                for key, name in classes.items():
+                    if values[key] is None and f"all {name} data".lower() in plain:
+                        values[key] = f"{match.group(1)}%"
+        return values
+    # The application already needs bs4 for postprocessing; retain legacy fallback.
+    return {key: _ifc_class_percent_from_html(html_path, name) for key, name in classes.items()}
+
+
 # ---------------------------- CLI helper ----------------------------
-def _run_ifctester_cli(ids_path: str, ifc_path: str, report: str, out_dir: Path) -> None:
+def _run_ifctester_cli(ids_path: str, ifc_path: str, report: str, out_dir: Path, output_path=None) -> None:
     if getattr(sys, "frozen", False):
         raise RuntimeError(
             "CLI-запуск ifctester отключён в exe-сборке. "
@@ -383,6 +444,8 @@ def _run_ifctester_cli(ids_path: str, ifc_path: str, report: str, out_dir: Path)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     args = [sys.executable, "-m", "ifctester", ids_path, ifc_path, "-r", report]
+    if output_path is not None:
+        args.extend(["-o", str(Path(output_path).resolve())])
 
     completed = subprocess.run(
         args,
@@ -417,7 +480,7 @@ def emit_reports(
     out_dir = out_base.parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    target_html = out_base.with_suffix(".html")
+    target_html = out_base.with_name(out_base.name + ".html")
 
     try:
         if target_html.exists():
@@ -438,17 +501,8 @@ def emit_reports(
 
     if not html_ok:
         try:
-            stem = Path(ifc_path).stem
-            tmp_html = out_dir / f"{stem}.html"
-
-            if tmp_html.exists():
-                tmp_html.unlink()
-
-            _run_ifctester_cli(ids_path, ifc_path, "Html", out_dir)
-
-            if tmp_html.exists():
-                tmp_html.replace(target_html)
-                html_ok = target_html.exists()
+            _run_ifctester_cli(ids_path, ifc_path, "Html", out_dir, output_path=target_html)
+            html_ok = target_html.exists()
         except Exception:
             html_ok = False
 
@@ -457,10 +511,225 @@ def emit_reports(
             postprocess_html_report(
                 target_html,
                 mapping_path=mapping_path,
-                remove_empty_ifc_classes=remove_empty_ifc_classes
+                remove_empty_ifc_classes=remove_empty_ifc_classes,
+                validation_specs=specs,
             )
         except Exception as e:
             print(f"[POSTPROCESS ERROR] {target_html}: {e}")
 
     percent = _percent_from_html(target_html) if html_ok else None
+    if not html_ok or not target_html.exists():
+        raise RuntimeError(f"Не удалось создать HTML-отчёт: {target_html}")
     return target_html, percent
+
+
+# ------------------------ parallel model checks ---------------------
+_WORKER_EVENTS = None
+_WORKER_STOP = None
+_IDS_TEMPLATES = {}
+
+
+def available_cpu_count():
+    count = getattr(os, "process_cpu_count", os.cpu_count)()
+    return max(1, count or 1)
+
+
+def model_worker_count(requested, total):
+    count = available_cpu_count() if not requested else max(1, int(requested))
+    # ProcessPoolExecutor has a documented Windows limit of 61 processes.
+    if os.name == "nt":
+        count = min(count, 61)
+    return max(1, min(count, max(1, total)))
+
+
+def initialize_model_worker(events, stop):
+    global _WORKER_EVENTS, _WORKER_STOP
+    _WORKER_EVENTS, _WORKER_STOP = events, stop
+    _IDS_TEMPLATES.clear()
+
+
+def _fresh_ids(path):
+    source = Path(path)
+    stamp = source.stat()
+    key = (str(source.resolve()), stamp.st_mtime_ns, stamp.st_size)
+    template = _IDS_TEMPLATES.get(key)
+    if template is None:
+        template = open_ids(path)
+        _IDS_TEMPLATES[key] = template
+    # Validated specs hold model entities; only cache unvalidated templates.
+    return deepcopy(template)
+
+
+def check_model_task(task, stop=None, notify=None):
+    """One IFC model and its own IDS objects, entirely outside Tkinter."""
+    stop = stop if stop is not None else _WORKER_STOP
+    def stopped():
+        return stop is not None and stop.is_set()
+    def send(kind, value):
+        event = (task["index"], kind, value)
+        if notify is not None:
+            notify(event)
+        elif _WORKER_EVENTS is not None:
+            _WORKER_EVENTS.put(event)
+    if stopped():
+        return None
+    started = time.perf_counter()
+    path = Path(task["ifc_path"])
+    name = path.name
+    root = Path(task["reports_dir"])
+    use_discipline = task["discipline_enabled"]
+    item = {
+        "model": name, "common_ids": task["common_ids"],
+        "common_ids_fingerprint": task.get("common_signature", ""),
+        "disc_ids": "", "common_status": "error",
+        "disc_status": "not_run" if use_discipline else "disabled",
+        "revit_name": task.get("revit_name", ""), "site_name": None,
+        "x": None, "y": None, "z": None, "lat": None, "lon": None,
+        "site_building_pct": None, "building_pct": None, "storey_pct": None,
+        "qty": None, "dir_root": root, "common": None, "common_pct": None,
+        "disc": None, "disc_pct": None, "disc_code": None, "storey_names": [],
+    }
+    try:
+        send("status", f"Открытие IFC: {name}")
+        model = open_ifc(str(path))
+        if stopped():
+            return None
+        item.update(get_ifc_site_data(model))
+        item["qty"] = get_ifc_elements_count(model)
+        item["storey_names"] = get_ifc_storey_names(model)
+        if stopped():
+            return None
+        passes = [("common", task["common_ids"], "Общие", None)]
+        rule = task.get("discipline_rule")
+        if use_discipline and rule:
+            item["disc_ids"] = rule["ids_path"]
+            item["disc_ids_fingerprint"] = task.get("discipline_signature", "")
+            passes.append(("disc", rule["ids_path"], "Дисциплинарные", rule.get("mapping_path")))
+        for key, ids_path, subdir, mapping in passes:
+            if stopped():
+                break
+            label = "Общая IDS" if key == "common" else "Дисциплина"
+            item[key+"_status"] = "error"
+            try:
+                send("status", f"{label}: {name}")
+                specs = _fresh_ids(ids_path)
+                specs.validate(model)
+                # Complete the report of a finished validation even after Stop.
+                html, percent = emit_reports(specs, root / subdir / path.stem,
+                    ids_path, str(path), mapping_path=mapping,
+                    remove_empty_ifc_classes=task.get("remove_empty_ifc_classes", False))
+                item[key], item[key+"_pct"] = html, percent
+                item[key+"_status"] = "result" if percent is not None else "no_result"
+                if key == "disc":
+                    item["disc_code"] = ""
+                metrics = ifc_class_percentages_from_html(html)
+                for metric, value in metrics.items():
+                    if key == "common" or value is not None:
+                        item[metric] = value
+                send("log", f"✅ {label}: {html}")
+                send("report", str(html))
+            except Exception as error:
+                send("log", f"❌ Ошибка {label}: {name}: {error}")
+        if use_discipline and not rule and not stopped():
+            item["disc_status"] = "no_rule"
+            send("log", f"🟡 Правило дисциплины не найдено — выполнена только общая проверка: {name}")
+    except Exception as error:
+        send("log", f"❌ Ошибка обработки IFC: {name}: {error}")
+    item["checked_at"] = datetime.now().astimezone().isoformat(timespec="microseconds")
+    item["elapsed_seconds"] = round(time.perf_counter()-started, 3)
+    item["worker_pid"] = os.getpid()
+    return item
+
+
+def run_model_batch(tasks, requested_workers, stop, on_event, on_result):
+    """Rolling submission; only the coordinator handles shared state and events."""
+    tasks = list(tasks)
+    if not tasks:
+        return []
+    outputs = set()
+    for task in tasks:
+        key = (str(Path(task["reports_dir"]).resolve()).casefold(), Path(task["ifc_path"]).stem.casefold())
+        if key in outputs:
+            raise ValueError(f"Совпадают имена отчётов IFC: {task['ifc_path']}")
+        outputs.add(key)
+    workers = model_worker_count(requested_workers, len(tasks))
+    items = {}
+    def accept(task, item):
+        if item is not None:
+            items[task["index"]] = item
+            on_result(task["index"], item)
+    if workers == 1:
+        _IDS_TEMPLATES.clear()
+        for task in tasks:
+            if stop.is_set():
+                break
+            accept(task, check_model_task(task, stop=stop, notify=on_event))
+        _IDS_TEMPLATES.clear()
+        return [items[index] for index in sorted(items)]
+    context = multiprocessing.get_context("spawn")
+    events, shared_stop = context.Queue(), context.Event()
+    executor = None
+    aborted = False
+    def drain():
+        while True:
+            try:
+                on_event(events.get_nowait())
+            except queue.Empty:
+                return
+    try:
+        executor = ProcessPoolExecutor(max_workers=workers, mp_context=context,
+            initializer=initialize_model_worker, initargs=(events, shared_stop))
+        pending = {}
+        iterator = iter(tasks)
+        def submit_next():
+            if stop.is_set() or aborted:
+                shared_stop.set()
+                return
+            task = next(iterator, None)
+            if task is not None:
+                pending[executor.submit(check_model_task, task)] = task
+        for _ in range(workers):
+            submit_next()
+        while pending:
+            if stop.is_set() or aborted:
+                shared_stop.set()
+                for future in pending:
+                    future.cancel()
+            done, _ = wait(pending, timeout=0.1, return_when=FIRST_COMPLETED)
+            drain()
+            for future in done:
+                task = pending.pop(future)
+                if not future.cancelled():
+                    try:
+                        item = future.result()
+                    except Exception as error:
+                        on_event((task["index"], "log", f"❌ Исполнитель завершился с ошибкой: {task['ifc_path']}: {error}"))
+                        # Retain other completed results; stop further submissions.
+                        aborted = True
+                        shared_stop.set()
+                        item = None
+                    accept(task, item)
+                submit_next()
+        return [items[index] for index in sorted(items)]
+    finally:
+        shared_stop.set()
+        if executor is not None:
+            # Keep draining IPC while workers flush their queue and shut down.
+            # Otherwise a full pipe can deadlock shutdown on large batches.
+            shutdown_done = threading.Event()
+            shutdown_errors = []
+            def shutdown_pool():
+                try:
+                    executor.shutdown(wait=True, cancel_futures=True)
+                except Exception as error:
+                    shutdown_errors.append(error)
+                finally:
+                    shutdown_done.set()
+            threading.Thread(target=shutdown_pool, daemon=True).start()
+            while not shutdown_done.wait(0.05):
+                drain()
+        drain()
+        events.close()
+        events.join_thread()
+        if executor is not None and shutdown_errors:
+            raise shutdown_errors[0]
